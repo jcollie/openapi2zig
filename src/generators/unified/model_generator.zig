@@ -53,6 +53,8 @@ pub const UnifiedModelGenerator = struct {
     pub const generateJsonStringify = @import("model_generator/fields.zig").generateJsonStringify;
     pub const appendZigType = @import("model_generator/fields.zig").appendZigType;
     pub const appendArrayItemType = @import("model_generator/fields.zig").appendArrayItemType;
+    pub const referenceIsRecursive = @import("model_generator/fields.zig").referenceIsRecursive;
+    pub const appendRecursiveFieldType = @import("model_generator/fields.zig").appendRecursiveFieldType;
     pub const isFieldRequired = @import("model_generator/fields.zig").isFieldRequired;
 
     pub fn init(allocator: std.mem.Allocator) UnifiedModelGenerator {

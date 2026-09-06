@@ -6,6 +6,7 @@ const model_generator = @import("../model_generator.zig");
 const UnifiedModelGenerator = model_generator.UnifiedModelGenerator;
 const isExtensibleRequest = model_generator.isExtensibleRequest;
 const unions = @import("unions.zig");
+const refName = unions.refName;
 const nonNullUnionChild = unions.nonNullUnionChild;
 const unionVariants = unions.unionVariants;
 const isNullableSchema = unions.isNullableSchema;
@@ -104,6 +105,57 @@ pub fn generateStructFields(self: *UnifiedModelGenerator, owner_name: []const u8
     }
 }
 
+/// The definition a field refers to by value, if it refers to one at all.
+/// An array field is a slice and holds its element out of line, so it is not a
+/// value reference and cannot make a struct contain itself.
+fn valueReferenceOf(schema: Schema) ?[]const u8 {
+    if (arrayChildSchema(schema) != null) return null;
+    if (schema.ref) |ref| return refName(ref);
+    if (nonNullUnionChild(schema)) |child| return valueReferenceOf(child);
+    return null;
+}
+
+/// Whether a field of type `start` would make `owner_name` contain itself.
+/// A struct cannot hold itself by value, directly (Forgejo's `Repository` has
+/// a `parent` that is another `Repository`) or around a longer loop, so such a
+/// field has to be generated behind a pointer instead.
+pub fn referenceIsRecursive(self: *UnifiedModelGenerator, owner_name: []const u8, start: []const u8) !bool {
+    const schemas = self.source_schemas orelse return false;
+
+    var visited = std.StringHashMap(void).init(self.allocator);
+    defer visited.deinit();
+    var pending = std.ArrayList([]const u8).empty;
+    defer pending.deinit(self.allocator);
+
+    try pending.append(self.allocator, start);
+    while (pending.pop()) |name| {
+        if (std.mem.eql(u8, name, owner_name)) return true;
+        const entry = try visited.getOrPut(name);
+        if (entry.found_existing) continue;
+
+        const schema = schemas.get(name) orelse continue;
+        const properties = schema.properties orelse continue;
+        var property_iterator = properties.valueIterator();
+        while (property_iterator.next()) |property| {
+            if (valueReferenceOf(property.*)) |next| try pending.append(self.allocator, next);
+        }
+    }
+    return false;
+}
+
+/// Emit a self-referential field as a pointer, and report whether it did.
+/// Only the indirection is added: `std.json` allocates through a single-item
+/// pointer when parsing, so the field is read back the same way any other is.
+pub fn appendRecursiveFieldType(self: *UnifiedModelGenerator, owner_name: []const u8, field_schema: Schema) !bool {
+    const reference = valueReferenceOf(field_schema) orelse return false;
+    if (!try self.referenceIsRecursive(owner_name, reference)) return false;
+
+    if (isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
+    try self.buffer.appendSlice(self.allocator, "*const ");
+    try self.appendIdentifier(reference);
+    return true;
+}
+
 pub fn generateStructField(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8, field_schema: Schema, is_required: bool) !void {
     try self.buffer.appendSlice(self.allocator, "    ");
     try self.appendFieldIdentifier(field_name);
@@ -123,9 +175,11 @@ pub fn generateStructField(self: *UnifiedModelGenerator, owner_name: []const u8,
         if (is_required and isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
         if (!is_required and isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
         try self.buffer.appendSlice(self.allocator, "[]const u8");
-    } else if (!try self.appendNamedArrayTypeForField(owner_name, field_name, field_schema)) {
-        if (!try self.appendNamedFieldTypeForField(owner_name, field_name, field_schema)) {
-            try self.appendZigType(field_schema);
+    } else if (!try self.appendRecursiveFieldType(owner_name, field_schema)) {
+        if (!try self.appendNamedArrayTypeForField(owner_name, field_name, field_schema)) {
+            if (!try self.appendNamedFieldTypeForField(owner_name, field_name, field_schema)) {
+                try self.appendZigType(field_schema);
+            }
         }
     }
 
