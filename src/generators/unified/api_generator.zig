@@ -141,6 +141,26 @@ pub const UnifiedApiGenerator = struct {
             claimed.deinit();
         }
 
+        // Models sharing the output file are declarations at the same scope as
+        // the operation functions, so a specification with an operation id
+        // matching a definition name -- Forgejo has both an `ActionRun` schema
+        // and an `ActionRun` operation -- would emit two declarations of that
+        // name and fail to compile. Claiming the model names first makes the
+        // operation move aside instead. Multi-file output keeps models behind
+        // `model_prefix`, where they cannot collide, and leaves this empty.
+        if (self.inlined_model_names) |schemas| {
+            var schema_iterator = schemas.keyIterator();
+            while (schema_iterator.next()) |name| {
+                // Model declarations are emitted under the schema key itself
+                // (escaped where it is not a bare identifier), so the key is
+                // the name to claim.
+                const model_name = try self.allocator.dupe(u8, name.*);
+                errdefer self.allocator.free(model_name);
+                const entry = try claimed.getOrPut(model_name);
+                if (entry.found_existing) self.allocator.free(model_name);
+            }
+        }
+
         for (operations.items) |op_ref| {
             const operation_id = op_ref.operation.operationId orelse continue;
             if (self.operation_names.contains(operation_id)) continue;

@@ -738,6 +738,17 @@ pub fn appendZigTypeFromSchema(self: *UnifiedApiGenerator, schema: Schema) !void
             return;
         }
     }
+    // An array's element type lives in `items`, and dropping it turns a
+    // response like `{"type":"array","items":{"$ref":"#/definitions/User"}}`
+    // into `[]const std.json.Value` -- parseable, but useless to the caller.
+    if (schema.type == .array) {
+        if (schema.items) |items| {
+            try self.buffer.appendSlice(self.allocator, "[]const ");
+            try self.appendZigTypeFromSchema(items.*);
+            return;
+        }
+    }
+
     if (schema.type) |schema_type| {
         try self.appendZigTypeFromSchemaType(schema_type);
         return;

@@ -20,6 +20,7 @@ const header_and_fixed_query_tests = @import("tests/header_and_fixed_query_tests
 const sse_cancel_tests = @import("tests/sse_cancel_tests.zig");
 const comment_sanitization_tests = @import("tests/comment_sanitization_tests.zig");
 const parameter_reference_tests = @import("tests/parameter_reference_tests.zig");
+const response_reference_tests = @import("tests/response_reference_tests.zig");
 const path_template_tests = @import("tests/path_template_tests.zig");
 const operation_id_naming_tests = @import("tests/operation_id_naming_tests.zig");
 const legacy_keyword_tests = @import("tests/legacy_keyword_tests.zig");
@@ -65,6 +66,7 @@ comptime {
     _ = sse_cancel_tests;
     _ = comment_sanitization_tests;
     _ = parameter_reference_tests;
+    _ = response_reference_tests;
     _ = path_template_tests;
     _ = operation_id_naming_tests;
     _ = legacy_keyword_tests;

@@ -31,12 +31,21 @@ pub const Header = struct {
 
 pub const Response = struct {
     description: []const u8,
+    /// A `$ref` into the document's global `responses` table, as in
+    /// `{"$ref": "#/responses/ServerVersion"}`. Swagger 2.0 lets an operation
+    /// name a shared response instead of spelling one out, and a response
+    /// written that way carries nothing else -- no description, no schema --
+    /// so it has to be resolved before anything can be generated from it.
+    ref: ?[]const u8 = null,
     schema: ?Schema = null,
     headers: ?std.StringHashMap(Header) = null,
     examples: ?std.StringHashMap(json.Value) = null,
 
     pub fn deinit(self: *Response, allocator: std.mem.Allocator) void {
         allocator.free(self.description);
+        if (self.ref) |ref| {
+            allocator.free(ref);
+        }
         if (self.schema) |*schema| {
             schema.deinit(allocator);
         }
@@ -59,11 +68,15 @@ pub const Response = struct {
 
     pub fn parseFromJson(allocator: std.mem.Allocator, value: json.Value) anyerror!Response {
         const description = if (value.object.get("description")) |val| try allocator.dupe(u8, val.string) else try allocator.dupe(u8, "");
+        errdefer allocator.free(description);
+        const ref = if (value.object.get("$ref")) |val| try allocator.dupe(u8, val.string) else null;
+        errdefer if (ref) |r| allocator.free(r);
         const schema = if (value.object.get("schema")) |val| try Schema.parseFromJson(allocator, val) else null;
         const headers = if (value.object.get("headers")) |val| try parseHeaders(allocator, val) else null;
         const examples = if (value.object.get("examples")) |val| try parseExamples(allocator, val) else null;
         return Response{
             .description = description,
+            .ref = ref,
             .schema = schema,
             .headers = headers,
             .examples = examples,

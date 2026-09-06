@@ -34,6 +34,14 @@ const Paths2 = @import("../../models/v2.0/paths.zig").Paths;
 pub const SwaggerConverter = struct {
     allocator: std.mem.Allocator,
     spec_consumes: ?[]const []const u8 = null,
+    /// The document's global `responses` table, borrowed for the length of one
+    /// conversion so that a `$ref` inside an operation can be looked up in it.
+    spec_responses: ?std.StringHashMap(Response2) = null,
+
+    /// How far a chain of `$ref` responses is followed before it is treated as
+    /// a cycle. Nothing legitimate needs more than one hop; the limit only has
+    /// to stop a self-referential document from hanging the generator.
+    const max_response_ref_depth = 8;
 
     pub fn init(allocator: std.mem.Allocator) SwaggerConverter {
         return SwaggerConverter{ .allocator = allocator };
@@ -44,6 +52,11 @@ pub const SwaggerConverter = struct {
         const info = self.convertInfo(swagger.info);
         if (swagger.consumes) |c| self.spec_consumes = c;
         defer self.spec_consumes = null;
+        // Operations are converted with the global response table in hand: a
+        // `$ref` response resolves against it, and the paths must be converted
+        // after it is set rather than before.
+        if (swagger.responses) |r| self.spec_responses = r;
+        defer self.spec_responses = null;
         const paths = try self.convertPaths(swagger.paths);
         const servers = try self.createServersFromHostAndBasePath(swagger.host, swagger.basePath, swagger.schemes);
         const security = if (swagger.security) |security_list| try self.convertSecurityRequirements(security_list) else null;
@@ -376,7 +389,27 @@ pub const SwaggerConverter = struct {
         };
     }
 
-    fn convertResponse(self: *SwaggerConverter, response: Response2) !Response {
+    /// Follow a response's `$ref` into the global response table. Returns the
+    /// response the reference names, or the reference itself when it cannot be
+    /// resolved -- an unknown target is a defect in the document, and leaving
+    /// the empty response in place keeps the rest of the file generating.
+    fn resolveResponse(self: *SwaggerConverter, response: Response2) Response2 {
+        var current = response;
+        var depth: usize = 0;
+        while (current.ref) |ref| {
+            if (depth >= max_response_ref_depth) return current;
+            const responses = self.spec_responses orelse return current;
+            const prefix = "#/responses/";
+            if (!std.mem.startsWith(u8, ref, prefix)) return current;
+            const name = ref[prefix.len..];
+            current = responses.get(name) orelse return current;
+            depth += 1;
+        }
+        return current;
+    }
+
+    fn convertResponse(self: *SwaggerConverter, unresolved: Response2) !Response {
+        const response = self.resolveResponse(unresolved);
         const description = response.description; // Reference, don't duplicate
         const schema = if (response.schema) |resp_schema| blk: {
             const converted_schema = try self.convertSchema(resp_schema);
