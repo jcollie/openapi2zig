@@ -31,6 +31,7 @@
 const std = @import("std");
 const yaml_loader = @import("yaml_loader.zig");
 const generated_header = @import("generators/generated_header.zig");
+const output_normalizer = @import("generators/output_normalizer.zig");
 const cli = @import("cli.zig");
 
 // Core version detection
@@ -220,6 +221,20 @@ pub fn parseSwagger(allocator: std.mem.Allocator, json_content: []const u8) !Swa
 ///
 /// Returns:
 /// - String containing generated Zig model code
+/// Prepend the generated-file header to `code`.
+///
+/// The code is normalized first, so what is written is already `zig fmt` clean
+/// and the header's checksum describes exactly the bytes below it -- which is
+/// what lets an unchanged regeneration skip rewriting the file.
+fn withGeneratedHeader(allocator: std.mem.Allocator, io: std.Io, code: []const u8) ![]const u8 {
+    const normalized = try output_normalizer.normalize(allocator, code);
+    defer allocator.free(normalized);
+    const checksum = generated_header.computeChecksum(normalized);
+    const header = try generated_header.renderNowWithChecksum(allocator, io, checksum);
+    defer allocator.free(header);
+    return try std.mem.concat(allocator, u8, &.{ header, normalized });
+}
+
 pub fn generateModels(allocator: std.mem.Allocator, unified_doc: UnifiedDocument) ![]const u8 {
     var model_generator = UnifiedModelGenerator.init(allocator);
     defer model_generator.deinit();
@@ -256,10 +271,7 @@ pub fn generateRuntime(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     defer runtime_gen.deinit();
     const runtime_code = try runtime_gen.generate();
     defer allocator.free(runtime_code);
-    const checksum = generated_header.computeChecksum(runtime_code);
-    const header = try generated_header.renderNowWithChecksum(allocator, io, checksum);
-    defer allocator.free(header);
-    return try std.mem.concat(allocator, u8, &.{ header, runtime_code });
+    return try withGeneratedHeader(allocator, io, runtime_code);
 }
 
 fn rejectRuntimeOnlyConflicts(args: CliArgs) !void {
@@ -290,10 +302,7 @@ pub fn generateCode(allocator: std.mem.Allocator, io: std.Io, unified_doc: Unifi
     defer allocator.free(models_code);
 
     if (args.models_only) {
-        const checksum = generated_header.computeChecksum(models_code);
-        const header = try generated_header.renderNowWithChecksum(allocator, io, checksum);
-        defer allocator.free(header);
-        return try std.mem.concat(allocator, u8, &.{ header, models_code });
+        return try withGeneratedHeader(allocator, io, models_code);
     }
 
     const api_code = try generateApi(allocator, unified_doc, args);
@@ -302,11 +311,7 @@ pub fn generateCode(allocator: std.mem.Allocator, io: std.Io, unified_doc: Unifi
     const combined = try std.mem.concat(allocator, u8, &.{ models_code, "\n", api_code });
     defer allocator.free(combined);
 
-    const checksum = generated_header.computeChecksum(combined);
-    const header = try generated_header.renderNowWithChecksum(allocator, io, checksum);
-    defer allocator.free(header);
-
-    return try std.mem.concat(allocator, u8, &.{ header, combined });
+    return try withGeneratedHeader(allocator, io, combined);
 }
 
 /// Result of generating code in multiple-files mode.
@@ -335,10 +340,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
         defer runtime_gen.deinit();
         const runtime_code = try runtime_gen.generate();
         defer allocator.free(runtime_code);
-        const runtime_checksum = generated_header.computeChecksum(runtime_code);
-        const runtime_header = try generated_header.renderNowWithChecksum(allocator, io, runtime_checksum);
-        defer allocator.free(runtime_header);
-        const runtime_with_header = try std.mem.concat(allocator, u8, &.{ runtime_header, runtime_code });
+        const runtime_with_header = try withGeneratedHeader(allocator, io, runtime_code);
         errdefer allocator.free(runtime_with_header);
         const empty_models = try allocator.dupe(u8, "");
         return .{ .models = empty_models, .runtime = runtime_with_header, .client = null };
@@ -353,11 +355,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
     const models_code = try generateModels(allocator, unified_doc);
     defer allocator.free(models_code);
 
-    const models_checksum = generated_header.computeChecksum(models_code);
-    const models_header = try generated_header.renderNowWithChecksum(allocator, io, models_checksum);
-    defer allocator.free(models_header);
-
-    const models_with_header = try std.mem.concat(allocator, u8, &.{ models_header, models_code });
+    const models_with_header = try withGeneratedHeader(allocator, io, models_code);
     errdefer allocator.free(models_with_header);
 
     if (args.models_only) {
@@ -425,11 +423,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
         const runtime_code = try runtime_gen.generate();
         defer allocator.free(runtime_code);
 
-        const runtime_checksum = generated_header.computeChecksum(runtime_code);
-        const runtime_header = try generated_header.renderNowWithChecksum(allocator, io, runtime_checksum);
-        defer allocator.free(runtime_header);
-
-        runtime_with_header = try std.mem.concat(allocator, u8, &.{ runtime_header, runtime_code });
+        runtime_with_header = try withGeneratedHeader(allocator, io, runtime_code);
 
         runtime_alias_owned = try cli.deriveAlias(allocator, runtime_file, "runtime");
         const computed_import = if (std.fs.path.dirname(client_file)) |client_dir| blk: {
@@ -463,11 +457,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
     const api_code = try api_gen.generateClientOnly(unified_doc);
     defer allocator.free(api_code);
 
-    const client_checksum = generated_header.computeChecksum(api_code);
-    const client_header = try generated_header.renderNowWithChecksum(allocator, io, client_checksum);
-    defer allocator.free(client_header);
-
-    const client_with_header = try std.mem.concat(allocator, u8, &.{ client_header, api_code });
+    const client_with_header = try withGeneratedHeader(allocator, io, api_code);
     errdefer allocator.free(client_with_header);
 
     return .{
