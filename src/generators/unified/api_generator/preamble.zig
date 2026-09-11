@@ -183,7 +183,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    }
         \\}
         \\
-        \\fn appendQueryParam(writer: *std.Io.Writer, first_query: *bool, name: []const u8, value: anytype) !void {
+        \\fn appendQueryPair(writer: *std.Io.Writer, first_query: *bool, name: []const u8, value: anytype) !void {
         \\    if (first_query.*) {
         \\        try writer.writeByte('?');
         \\        first_query.* = false;
@@ -193,6 +193,26 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    try writeQueryComponent(writer, name);
         \\    try writer.writeByte('=');
         \\    try writeQueryValue(writer, value);
+        \\}
+        \\
+        \\fn appendQueryParam(writer: *std.Io.Writer, first_query: *bool, name: []const u8, value: anytype) !void {
+        \\    switch (@typeInfo(@TypeOf(value))) {
+        \\        .pointer => |ptr| {
+        \\            // A slice of anything but bytes is a multi-valued parameter,
+        \\            // written as the key repeated once per element -- ?id=1&id=2.
+        \\            // That is OpenAPI's `form` style with `explode` set, which is
+        \\            // the default for query parameters. A []const u8 is a single
+        \\            // string value and falls through to the scalar path below.
+        \\            if (ptr.size == .slice and ptr.child != u8) {
+        \\                for (value) |element| {
+        \\                    try appendQueryPair(writer, first_query, name, element);
+        \\                }
+        \\                return;
+        \\            }
+        \\        },
+        \\        else => {},
+        \\    }
+        \\    try appendQueryPair(writer, first_query, name, value);
         \\}
         \\
         \\/// Serializes an `in: header` parameter value to an owned string. Reuses

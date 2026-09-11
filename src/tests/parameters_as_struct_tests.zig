@@ -762,3 +762,82 @@ test "options type and field name caches release memory when allocation fails" {
 
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkOptionsCacheGeneration, .{document});
 }
+
+/// A document whose query parameters are arrays, which is how a filter that
+/// accepts several values at once is declared. Kept separate from
+/// `buildFixture` so that the occurrence counts asserted above stay stable.
+fn buildArrayFixture(allocator: std.mem.Allocator) !common.UnifiedDocument {
+    var paths = std.StringHashMap(common.PathItem).init(allocator);
+    errdefer paths.deinit();
+
+    const tag_items = try allocator.create(common.Schema);
+    tag_items.* = .{ .type = .integer };
+    const name_items = try allocator.create(common.Schema);
+    name_items.* = .{ .type = .string };
+
+    const filter_params = try allocator.dupe(common.Parameter, &.{
+        .{ .name = "tag_id", .location = .query, .schema = .{ .type = .array, .items = tag_items } },
+        .{ .name = "name", .location = .query, .schema = .{ .type = .array, .items = name_items } },
+        .{ .name = "limit", .location = .query, .schema = .{ .type = .integer } },
+    });
+    try paths.put(try allocator.dupe(u8, "/pets/filter"), .{
+        .get = try op(allocator, "filterPets", filter_params, true),
+    });
+
+    return .{
+        .version = "3.0.0",
+        .info = .{ .title = "fixture", .version = "1.0.0" },
+        .paths = paths,
+    };
+}
+
+test "array query parameters become slices of the item type" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    var document = try buildArrayFixture(allocator);
+    defer document.deinit(allocator);
+
+    var generator = UnifiedApiGenerator.init(allocator, .{
+        .input_path = "fixture.json",
+        .parameters_as_struct = true,
+        .resource_wrappers = .none,
+    });
+    defer generator.deinit();
+
+    const code = try generator.generate(document);
+    defer allocator.free(code);
+
+    // An array of integers is a slice of i64 rather than the []const u8 that
+    // every unrecognised schema type used to fall back to, and a scalar
+    // alongside it is unaffected.
+    try std.testing.expect(std.mem.indexOf(u8, code, "pub const filterPetsOptions = struct {\n    tag_id: ?[]const i64 = null,\n    name: ?[]const []const u8 = null,\n    limit: ?i64 = null,\n};") != null);
+}
+
+test "multi-valued query parameters are written as a repeated key" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    var document = try buildArrayFixture(allocator);
+    defer document.deinit(allocator);
+
+    var generator = UnifiedApiGenerator.init(allocator, .{
+        .input_path = "fixture.json",
+        .parameters_as_struct = true,
+        .resource_wrappers = .none,
+    });
+    defer generator.deinit();
+
+    const code = try generator.generate(document);
+    defer allocator.free(code);
+
+    // The call site is unchanged -- appendQueryParam decides at comptime
+    // whether the value is one value or many -- so the emitted runtime helper
+    // is what has to carry the repetition.
+    try std.testing.expect(std.mem.indexOf(u8, code, "try appendQueryParam(&uri_buf.writer, &first_query, \"tag_id\", value);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "if (ptr.size == .slice and ptr.child != u8) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "for (value) |element| {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "try appendQueryPair(writer, first_query, name, element);") != null);
+}

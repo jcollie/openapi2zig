@@ -703,6 +703,19 @@ pub fn appendZigQueryTypeFromSchema(self: *UnifiedApiGenerator, schema: Schema) 
             .integer => try self.buffer.appendSlice(self.allocator, "i64"),
             .number => try self.buffer.appendSlice(self.allocator, "f64"),
             .boolean => try self.buffer.appendSlice(self.allocator, "bool"),
+            // A query parameter declared as an array accepts several values,
+            // sent as a repeated key, so it maps to a slice of the item type.
+            // `items` is recursed through rather than read directly so that
+            // the item's own type mapping applies; a `nullable` item is not
+            // represented, because there is no way to send null in a query.
+            .array => {
+                try self.buffer.appendSlice(self.allocator, "[]const ");
+                if (schema.items) |items| {
+                    try self.appendZigQueryTypeFromSchema(items.*);
+                } else {
+                    try self.buffer.appendSlice(self.allocator, "[]const u8");
+                }
+            },
             else => try self.buffer.appendSlice(self.allocator, "[]const u8"),
         }
         return;
