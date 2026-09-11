@@ -71,7 +71,22 @@
           "own": { "type": "boolean" }
         }
       },
-      "Mystery": { "type": "weird" }
+      "Mystery": { "type": "weird" },
+      "Wrapper": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "allOf": [{ "$ref": "#/components/schemas/Base" }],
+            "nullable": true
+          },
+          "composed": {
+            "allOf": [{ "$ref": "#/components/schemas/Base" }],
+            "properties": {
+              "own_prop": { "type": "string" }
+            }
+          }
+        }
+      }
     }
   }
 }

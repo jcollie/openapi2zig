@@ -324,10 +324,46 @@ pub const OpenApiConverter = struct {
         return existing and next;
     }
 
+    /// The reference named by an `allOf` that exists only to carry keywords
+    /// alongside it, or null when the composition has something of its own to
+    /// merge. OpenAPI 3.0 gives `$ref` no siblings, so a lone member wrapped
+    /// this way is how the specification says "nullable reference to X", and
+    /// NetBox and every other Django REST Framework schema is full of them.
+    fn singleReferenceWrapper(schema: Schema3) ?[]const u8 {
+        const all_of = schema.allOf orelse return null;
+        if (all_of.len != 1) return null;
+        // Anything the composing schema declares itself makes this a real
+        // composition, whose members have to be merged rather than named.
+        if (schema.properties != null) return null;
+        if (schema.required != null) return null;
+        if (schema.additionalProperties != null) return null;
+        return switch (all_of[0]) {
+            .reference => |ref| ref.ref,
+            .schema => null,
+        };
+    }
+
     /// Flatten an `allOf` composition into a single object schema by merging
     /// the properties and required lists of its members with the ones the
     /// composing schema declares itself.
     fn convertAllOfSchema(self: *OpenApiConverter, schema: Schema3) anyerror!Schema {
+        // A wrapper names a type rather than defining one, so it stays a
+        // reference. Flattening it would copy the target's properties into an
+        // anonymous object, and an anonymous object has to be given a name --
+        // one built from the enclosing type and the property, which collides
+        // with a real schema whenever the two spell the same word. That is how
+        // `InventoryItem.role` came to emit a second, different
+        // `InventoryItemRole` alongside the component of that name.
+        if (singleReferenceWrapper(schema)) |ref| {
+            return Schema{
+                .type = .reference,
+                .ref = ref,
+                .title = schema.title,
+                .description = schema.description,
+                .nullable = schema.nullable orelse false,
+            };
+        }
+
         var merged_properties = std.StringHashMap(Schema).init(self.allocator);
         var required_list = std.ArrayList([]const u8).empty;
         var additional_properties = convertAdditionalProperties(schema.additionalProperties);

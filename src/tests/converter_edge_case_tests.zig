@@ -102,3 +102,38 @@ test "the v3.2 converter does not implement allOf" {
     try std.testing.expect(properties.get("id") == null);
     try std.testing.expect(properties.get("inline_prop") == null);
 }
+
+// OpenAPI 3.0 gives `$ref` no siblings, so "a nullable reference to X" has to
+// be written as a one-member `allOf` wrapping the reference. Flattening such a
+// wrapper copies X's properties into an anonymous object, and an anonymous
+// object has to be named after the property that holds it -- which collides
+// with a real schema whenever the two spell the same word.
+fn expectWrapperStaysAReference(allocator: std.mem.Allocator, path: []const u8) !void {
+    var document = try convert(allocator, path);
+    defer document.deinit(allocator);
+
+    const properties = document.schemas.?.get("Wrapper").?.properties.?;
+
+    const base = properties.get("base").?;
+    try std.testing.expectEqual(openapi2zig.SchemaType.reference, base.type.?);
+    try std.testing.expectEqualStrings("#/components/schemas/Base", base.ref.?);
+    // Flattening would have left Base's properties here under a new name.
+    try std.testing.expect(base.properties == null);
+
+    // A wrapper that contributes something of its own is a real composition
+    // and is still merged.
+    const composed = properties.get("composed").?;
+    try std.testing.expect(composed.ref == null);
+    try std.testing.expect(composed.properties.?.get("own_prop") != null);
+    try std.testing.expect(composed.properties.?.get("id") != null);
+}
+
+test "the v3.0 converter keeps a single-reference allOf as a reference" {
+    var gpa = test_utils.createTestAllocator();
+    try expectWrapperStaysAReference(gpa.allocator(), "openapi/v3.0/converter-edge-cases.json");
+}
+
+test "the v3.1 converter keeps a single-reference allOf as a reference" {
+    var gpa = test_utils.createTestAllocator();
+    try expectWrapperStaysAReference(gpa.allocator(), "openapi/v3.1/converter-edge-cases.json");
+}

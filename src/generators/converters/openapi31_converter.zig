@@ -329,7 +329,35 @@ pub const OpenApi31Converter = struct {
         }
     }
 
+    /// The reference named by an `allOf` that exists only to carry keywords
+    /// alongside it. 3.1 lets `$ref` have siblings and so has less need of the
+    /// wrapper than 3.0 did, but documents upgraded from 3.0 keep it, and
+    /// flattening one copies the target's properties into an anonymous object
+    /// that then has to be named after the property holding it -- a name that
+    /// collides with a real schema whenever the two spell the same word.
+    fn singleReferenceWrapper(schema: Schema31) ?[]const u8 {
+        const all_of = schema.allOf orelse return null;
+        if (all_of.len != 1) return null;
+        if (schema.properties != null) return null;
+        if (schema.required != null) return null;
+        if (schema.additionalProperties != null) return null;
+        return switch (all_of[0]) {
+            .reference => |ref| ref.ref,
+            .schema => null,
+        };
+    }
+
     fn convertAllOfSchema(self: *OpenApi31Converter, schema: Schema31) anyerror!Schema {
+        if (singleReferenceWrapper(schema)) |ref| {
+            return Schema{
+                .type = .reference,
+                .ref = ref,
+                .title = schema.title,
+                .description = schema.description,
+                .nullable = schema.nullable orelse false,
+            };
+        }
+
         var merged_properties = std.StringHashMap(Schema).init(self.allocator);
         var required_list = std.ArrayList([]const u8).empty;
 
