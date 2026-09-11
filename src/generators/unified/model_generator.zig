@@ -120,9 +120,32 @@ pub const UnifiedModelGenerator = struct {
         }
     }
 
+    /// Declare a component that is nothing but a `$ref` to another as an alias
+    /// of it.
+    ///
+    /// Such a component names a type rather than defining one, and everything
+    /// referring to it uses its own name, so skipping it leaves the generated
+    /// file naming a type nothing declares. Zig's top-level declarations are
+    /// order independent, so the target need not come first.
+    pub fn generateReferenceAlias(self: *UnifiedModelGenerator, name: []const u8, schema: Schema) !void {
+        const ref = schema.ref orelse return;
+        const target = UnifiedModelGenerator.refName(ref);
+        // `pub const X = X;` does not compile, and a component naming itself
+        // says nothing worth emitting.
+        if (std.mem.eql(u8, target, name)) return;
+        try self.buffer.appendSlice(self.allocator, "pub const ");
+        try self.appendIdentifier(name);
+        try self.buffer.appendSlice(self.allocator, " = ");
+        try self.appendIdentifier(target);
+        try self.buffer.appendSlice(self.allocator, ";\n\n");
+    }
+
     pub fn generateSchema(self: *UnifiedModelGenerator, name: []const u8, schema: Schema) anyerror!void {
         if (try self.generateManualSchema(name, schema)) return;
-        if (schema.type == .reference) return;
+        if (schema.type == .reference) {
+            try self.generateReferenceAlias(name, schema);
+            return;
+        }
 
         if (try self.generateUnionAlias(name, schema)) return;
         if (try self.generateDiscriminatorUnion(name, schema)) return;
