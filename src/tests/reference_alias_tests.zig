@@ -4,7 +4,7 @@ const models = @import("../models.zig");
 const OpenApiConverter = @import("../generators/converters/openapi_converter.zig").OpenApiConverter;
 const UnifiedModelGenerator = @import("../generators/unified/model_generator.zig").UnifiedModelGenerator;
 
-// A component schema that is nothing but a `$ref` to another. Cisco
+// A component schema that is nothing but a `$ref` to another. Singlewire
 // InformaCast's schema is full of them -- 31 of its 615 components are written
 // this way, a name for a "merged" definition next door -- and the names are
 // used by properties and responses throughout. Emitting nothing for such a
