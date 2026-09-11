@@ -152,6 +152,11 @@ pub const Schema = struct {
     minProperties: ?i64 = null,
     required: ?[]const []const u8 = null,
     enum_values: ?[]const json.Value = null,
+    /// `x-spec-enum-id`, drf-spectacular's marker naming the choice set an
+    /// enum came from. Several schemas carrying the same one are the same
+    /// enum, which is the only way to tell, since the values alone differ
+    /// between contexts by a null variant.
+    spec_enum_id: ?[]const u8 = null,
     type: ?[]const u8 = null,
     type_array: ?[]const []const u8 = null,
     not: ?SchemaOrReference = null,
@@ -256,6 +261,7 @@ pub const Schema = struct {
 
             .required = if (required_list.items.len > 0) try required_list.toOwnedSlice(allocator) else null,
             .enum_values = if (enum_list.items.len > 0) try enum_list.toOwnedSlice(allocator) else null,
+            .spec_enum_id = if (obj.get("x-spec-enum-id")) |val| try allocator.dupe(u8, val.string) else null,
             .type = type_str,
             .type_array = type_array,
             .not = if (obj.get("not")) |val| try SchemaOrReference.parseFromJson(allocator, val) else null,
@@ -281,6 +287,7 @@ pub const Schema = struct {
 
     pub fn deinit(self: *Schema, allocator: std.mem.Allocator) void {
         if (self.title) |title| allocator.free(title);
+        if (self.spec_enum_id) |id| allocator.free(id);
         if (self.pattern) |pattern| allocator.free(pattern);
         if (self.type) |type_val| allocator.free(type_val);
         if (self.type_array) |type_arr| {

@@ -101,6 +101,9 @@ pub const Schema = struct {
     properties: ?std.StringHashMap(Schema) = null,
     items: ?*Schema = null,
     enum_values: ?[]const json.Value = null,
+    /// The `x-spec-enum-id` of the schema this came from, when it had one.
+    /// Borrowed from the source document, so `deinit` never frees it.
+    enum_id: ?[]const u8 = null,
     default: ?json.Value = null,
     example: ?json.Value = null,
     one_of_refs: ?[][]const u8 = null,

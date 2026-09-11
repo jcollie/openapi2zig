@@ -697,6 +697,16 @@ pub fn appendReturnType(self: *UnifiedApiGenerator, method: []const u8, operatio
 }
 
 pub fn appendZigQueryTypeFromSchema(self: *UnifiedApiGenerator, schema: Schema) !void {
+    // A filter with a choice list gets that list's type, so the caller writes
+    // `.status = .active` rather than a string the server may reject.
+    if (self.enums) |*registry| {
+        if (registry.lookup(schema)) |name| {
+            try self.buffer.appendSlice(self.allocator, self.model_prefix);
+            try self.buffer.appendSlice(self.allocator, name);
+            return;
+        }
+    }
+
     if (schema.type) |schema_type| {
         switch (schema_type) {
             .string => try self.buffer.appendSlice(self.allocator, "[]const u8"),

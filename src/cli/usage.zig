@@ -49,6 +49,7 @@ pub fn printUsage() void {
         \\                              (default output: runtime.zig)
         \\   --force                   Force overwriting output even when unchanged
         \\   --parameters-as-struct    Wrap method parameters in a single options struct
+        \\   --enums                   Generate a Zig enum for each schema `enum`
         \\                            instead of individual function arguments
         \\
         \\ EXAMPLES:

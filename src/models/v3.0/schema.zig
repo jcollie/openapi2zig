@@ -116,7 +116,12 @@ pub const Schema = struct {
     maxProperties: ?i64 = null,
     minProperties: ?i64 = null,
     required: ?[]const []const u8 = null,
-    enum_values: ?[]const json.Value = null, // Can be any type
+    enum_values: ?[]const json.Value = null,
+    /// `x-spec-enum-id`, drf-spectacular's marker naming the choice set an
+    /// enum came from. Several schemas carrying the same one are the same
+    /// enum, which is the only way to tell, since the values alone differ
+    /// between contexts by a null variant.
+    spec_enum_id: ?[]const u8 = null, // Can be any type
     type: ?[]const u8 = null, // "array", "boolean", "integer", "number", "object", "string"
     not: ?SchemaOrReference = null,
     allOf: ?[]const SchemaOrReference = null,
@@ -150,7 +155,9 @@ pub const Schema = struct {
         errdefer enum_list.deinit(allocator);
         if (obj.get("enum")) |enum_val| {
             for (enum_val.array.items) |item| {
-                try enum_list.append(allocator, item);
+                // Copied, not borrowed: the JSON tree these come from is freed
+                // when parsing returns, and the values outlive it.
+                try enum_list.append(allocator, try json_helpers.cloneScalar(allocator, item));
             }
         }
         var all_of_list = std.ArrayList(SchemaOrReference).empty;
@@ -198,6 +205,7 @@ pub const Schema = struct {
             .minProperties = if (obj.get("minProperties")) |val| val.integer else null,
             .required = if (required_list.items.len > 0) try required_list.toOwnedSlice(allocator) else null,
             .enum_values = if (enum_list.items.len > 0) try enum_list.toOwnedSlice(allocator) else null,
+            .spec_enum_id = if (obj.get("x-spec-enum-id")) |val| try allocator.dupe(u8, val.string) else null,
             .type = if (obj.get("type")) |val| try allocator.dupe(u8, val.string) else null,
             .not = if (obj.get("not")) |val| try SchemaOrReference.parseFromJson(allocator, val) else null,
             .allOf = if (all_of_list.items.len > 0) try all_of_list.toOwnedSlice(allocator) else null,
@@ -222,6 +230,7 @@ pub const Schema = struct {
 
     pub fn deinit(self: *Schema, allocator: std.mem.Allocator) void {
         if (self.title) |title| allocator.free(title);
+        if (self.spec_enum_id) |id| allocator.free(id);
         if (self.pattern) |pattern| allocator.free(pattern);
         if (self.type) |type_val| allocator.free(type_val);
         if (self.description) |description| allocator.free(description);
@@ -281,6 +290,7 @@ pub const Schema = struct {
             externalDocs.deinit(allocator);
         }
         if (self.enum_values) |enum_values| {
+            for (enum_values) |value| json_helpers.deinitScalar(allocator, value);
             allocator.free(enum_values);
         }
         if (self.xml) |*xml| {

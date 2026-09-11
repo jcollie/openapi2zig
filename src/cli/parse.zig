@@ -67,6 +67,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var force = false;
     var runtime_only = false;
     var parameters_as_struct = false;
+    var generate_enums = false;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -202,6 +203,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             runtime_only = true;
         } else if (std.mem.eql(u8, arg, "--parameters-as-struct")) {
             parameters_as_struct = true;
+        } else if (std.mem.eql(u8, arg, "--enums")) {
+            generate_enums = true;
         }
     }
 
@@ -389,6 +392,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .force = force,
             .runtime_only = runtime_only,
             .parameters_as_struct = parameters_as_struct,
+            .generate_enums = generate_enums,
         },
     };
 }

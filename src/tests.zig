@@ -29,6 +29,7 @@ const model_parse_edge_case_tests = @import("tests/model_parse_edge_case_tests.z
 const manual_override_tests = @import("tests/manual_override_tests.zig");
 const direct_operation_tests = @import("tests/direct_operation_tests.zig");
 const converter_edge_case_tests = @import("tests/converter_edge_case_tests.zig");
+const enum_generation_tests = @import("tests/enum_generation_tests.zig");
 const schema_shape_tests = @import("tests/schema_shape_tests.zig");
 const generator_pipeline_tests = @import("tests/generator_pipeline_tests.zig");
 const input_loader_http_tests = @import("tests/input_loader_http_tests.zig");
@@ -76,6 +77,7 @@ comptime {
     _ = manual_override_tests;
     _ = direct_operation_tests;
     _ = converter_edge_case_tests;
+    _ = enum_generation_tests;
     _ = schema_shape_tests;
     _ = generator_pipeline_tests;
     _ = input_loader_http_tests;

@@ -239,6 +239,16 @@ pub fn generateJsonStringify(self: *UnifiedModelGenerator, properties: std.Strin
 }
 
 pub fn appendZigType(self: *UnifiedModelGenerator, schema: Schema) !void {
+    // Ahead of the string-like case below, which would otherwise swallow a
+    // choice list into `[]const u8`.
+    if (self.enums) |*registry| {
+        if (registry.lookup(schema)) |name| {
+            if (isNullableSchema(schema)) try self.buffer.appendSlice(self.allocator, "?");
+            try self.appendIdentifier(name);
+            return;
+        }
+    }
+
     if (schema.discriminator_property == null and self.isStringLikeSchema(schema)) {
         if (isNullableSchema(schema)) try self.buffer.appendSlice(self.allocator, "?");
         try self.buffer.appendSlice(self.allocator, "[]const u8");

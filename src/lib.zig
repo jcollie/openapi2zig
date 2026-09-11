@@ -236,8 +236,20 @@ fn withGeneratedHeader(allocator: std.mem.Allocator, io: std.Io, code: []const u
 }
 
 pub fn generateModels(allocator: std.mem.Allocator, unified_doc: UnifiedDocument) ![]const u8 {
+    return try generateModelsWithArgs(allocator, unified_doc, .{ .input_path = "" });
+}
+
+/// Generate the models with the settings that affect them. `generateModels`
+/// remains for callers that want the defaults.
+///
+/// The API client refers to the enum types the models declare, so anything
+/// generating both has to pass the same `args` to each half; generating the
+/// models without `generate_enums` and the client with it yields a client that
+/// names types nothing declared.
+pub fn generateModelsWithArgs(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, args: CliArgs) ![]const u8 {
     var model_generator = UnifiedModelGenerator.init(allocator);
     defer model_generator.deinit();
+    model_generator.generate_enums = args.generate_enums;
 
     return try model_generator.generate(unified_doc);
 }
@@ -298,7 +310,7 @@ pub fn generateCode(allocator: std.mem.Allocator, io: std.Io, unified_doc: Unifi
         try rejectRuntimeOnlyConflicts(args);
         return try generateRuntime(allocator, io);
     }
-    const models_code = try generateModels(allocator, unified_doc);
+    const models_code = try generateModelsWithArgs(allocator, unified_doc, args);
     defer allocator.free(models_code);
 
     if (args.models_only) {
@@ -352,7 +364,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
     const client_file = try std.mem.replaceOwned(u8, allocator, args.file_names.get(.client) orelse cli.FileKind.client.defaultName(), "\\", "/");
     defer allocator.free(client_file);
 
-    const models_code = try generateModels(allocator, unified_doc);
+    const models_code = try generateModelsWithArgs(allocator, unified_doc, args);
     defer allocator.free(models_code);
 
     const models_with_header = try withGeneratedHeader(allocator, io, models_code);

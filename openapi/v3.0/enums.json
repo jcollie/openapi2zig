@@ -1,0 +1,61 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Enums", "version": "1.0.0" },
+  "paths": {
+    "/things/": {
+      "get": {
+        "operationId": "things_list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "priority",
+            "schema": {
+              "type": "string",
+              "x-spec-enum-id": "0548fc537440bf9d",
+              "nullable": true,
+              "enum": ["inactive", "null", "primary", "secondary", "tertiary"]
+            }
+          },
+          {
+            "in": "query",
+            "name": "weight",
+            "schema": { "type": "integer", "enum": [1, 2, 3] }
+          }
+        ],
+        "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Thing" } } } } }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Thing": {
+        "type": "object",
+        "properties": {
+          "priority": {
+            "type": "string",
+            "x-spec-enum-id": "0548fc537440bf9d",
+            "enum": ["primary", "secondary", "tertiary", "inactive"]
+          },
+          "blankable": {
+            "type": "string",
+            "enum": ["primary", "secondary", ""]
+          },
+          "odd name": {
+            "type": "string",
+            "enum": ["1.6tbase-cr8", "1 (2412 MHz)"]
+          }
+        }
+      },
+      "Other": {
+        "type": "object",
+        "properties": {
+          "priority": {
+            "type": "string",
+            "x-spec-enum-id": "9999999999999999",
+            "enum": ["low", "high"]
+          }
+        }
+      }
+    }
+  }
+}

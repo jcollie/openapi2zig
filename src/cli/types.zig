@@ -100,6 +100,9 @@ pub const CliArgs = struct {
     /// Wrap non-body method parameters in a single `options` struct instead of
     /// emitting them as individual function arguments.
     parameters_as_struct: bool = false,
+    /// Turn a schema's `enum` into a Zig enum rather than `[]const u8`. Off by
+    /// default, because it changes the type of every field carrying one.
+    generate_enums: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         if (self.owns_tags) allocator.free(self.tags);

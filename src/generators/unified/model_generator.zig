@@ -2,6 +2,7 @@ const std = @import("std");
 const UnifiedDocument = @import("../../models/common/document.zig").UnifiedDocument;
 const Schema = @import("../../models/common/document.zig").Schema;
 const ident = @import("ident_utils.zig");
+const enum_registry = @import("enum_registry.zig");
 
 pub fn isExtensibleRequest(name: []const u8) bool {
     return std.mem.eql(u8, name, "CreateResponse") or
@@ -12,6 +13,11 @@ pub const UnifiedModelGenerator = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8),
     source_schemas: ?*const std.StringHashMap(Schema) = null,
+    /// Set by whoever drives the generator, from `--enums`.
+    generate_enums: bool = false,
+    /// The document's enums as Zig types. See the note in `enum_registry` on
+    /// why the API generator builds its own rather than borrowing this.
+    enums: ?enum_registry.EnumRegistry = null,
 
     pub const unionVariants = @import("model_generator/unions.zig").unionVariants;
     pub const isNullSchema = @import("model_generator/unions.zig").isNullSchema;
@@ -71,6 +77,13 @@ pub const UnifiedModelGenerator = struct {
     pub fn generate(self: *UnifiedModelGenerator, document: UnifiedDocument) ![]const u8 {
         self.buffer.clearRetainingCapacity();
         try self.generateHeader();
+
+        if (self.generate_enums) self.enums = try enum_registry.build(self.allocator, document);
+        defer if (self.enums) |*registry| {
+            registry.deinit();
+            self.enums = null;
+        };
+        if (self.enums) |*registry| try registry.appendDeclarations(&self.buffer);
 
         if (document.schemas) |schemas| {
             self.source_schemas = &schemas;

@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("../../cli.zig");
+const enum_registry = @import("enum_registry.zig");
 const UnifiedDocument = @import("../../models/common/document.zig").UnifiedDocument;
 const SecurityScheme = @import("../../models/common/document.zig").SecurityScheme;
 const Operation = @import("../../models/common/document.zig").Operation;
@@ -73,6 +74,12 @@ pub const UnifiedApiGenerator = struct {
     runtime_import_alias: []const u8 = "runtime",
     has_streaming_operations: bool = false,
     auth_scheme: AuthScheme = .bearer,
+    /// The document's enums as Zig types, when `--enums` is on. Built here as
+    /// well as in the model generator rather than shared: both derive it from
+    /// the same document by the same deterministic rule, so the names agree,
+    /// and nothing has to be threaded through the several places that drive
+    /// the two generators.
+    enums: ?enum_registry.EnumRegistry = null,
 
     pub fn init(allocator: std.mem.Allocator, args: cli.CliArgs) UnifiedApiGenerator {
         return UnifiedApiGenerator{
@@ -232,6 +239,11 @@ pub const UnifiedApiGenerator = struct {
         try self.reserveOperationNames(document);
         self.has_streaming_operations = documentHasStreamingOperations(document);
         self.auth_scheme = authSchemeFor(document);
+        if (self.args.generate_enums) self.enums = try enum_registry.build(self.allocator, document);
+        defer if (self.enums) |*registry| {
+            registry.deinit();
+            self.enums = null;
+        };
         try self.generateHeader();
         try self.generateApiClient(document);
         if (self.args.resource_wrappers != .none) {
