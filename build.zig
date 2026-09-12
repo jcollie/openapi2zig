@@ -517,12 +517,18 @@ fn createBuildInfoOptions(b: *std.Build, run_integration_tests: bool) *std.Build
     else
         null) orelse "unknown";
     const version = if (std.mem.startsWith(u8, git_tag, "v")) git_tag[1..] else git_tag;
-    const build_date = getBuildDate(b.allocator, io) orelse "unknown";
 
+    // Everything here has to be a function of the source, never of the clock.
+    // These options become a generated file that is an input to every module
+    // built from this package, so a value that changes between two builds of
+    // the same tree gives that file a new hash, and nothing compiled from it
+    // -- nor anything downstream of *that*, such as a dependent's codegen step
+    // and whatever it emits -- can ever come out of the cache again. A build
+    // date is the obvious way to get this wrong: it cost zig-netbox a full
+    // regeneration of its 6.5 MB client on every single build.
     options.addOption([]const u8, "VERSION", version);
     options.addOption([]const u8, "GIT_TAG", git_tag);
     options.addOption([]const u8, "GIT_COMMIT", git_commit);
-    options.addOption([]const u8, "BUILD_DATE", build_date);
     options.addOption(bool, "RUN_INTEGRATION_TESTS", run_integration_tests);
 
     return options;
@@ -567,24 +573,6 @@ fn makePackageSnapshot(step: *std.Build.Step, options: std.Build.Step.MakeOption
 
         try cwd.copyFile(repo_path, cwd, destination_path, io, .{});
     }
-}
-
-fn getBuildDate(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
-    const timestamp = std.Io.Clock.real.now(io).toSeconds();
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(timestamp)) };
-    const epoch_day = epoch_seconds.getEpochDay();
-    const day_seconds = epoch_seconds.getDaySeconds();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-
-    return std.fmt.allocPrint(allocator, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{
-        year_day.year,
-        month_day.month.numeric(),
-        month_day.day_index + 1,
-        day_seconds.getHoursIntoDay(),
-        day_seconds.getMinutesIntoHour(),
-        day_seconds.getSecondsIntoMinute(),
-    }) catch null;
 }
 
 /// True when `dir` holds a `.git` of its own: a directory in a normal clone,
