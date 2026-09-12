@@ -215,7 +215,7 @@ test "generateCode emits models and the API client in one file" {
     var document = try openapi2zig.parseToUnified(allocator, contents);
     defer document.deinit(allocator);
 
-    const code = try openapi2zig.generateCode(allocator, std.testing.io, document, .{
+    const code = try openapi2zig.generateCode(allocator, document, .{
         .input_path = "openapi/v3.0/petstore.json",
     });
     defer allocator.free(code);

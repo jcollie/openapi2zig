@@ -226,11 +226,11 @@ pub fn parseSwagger(allocator: std.mem.Allocator, json_content: []const u8) !Swa
 /// The code is normalized first, so what is written is already `zig fmt` clean
 /// and the header's checksum describes exactly the bytes below it -- which is
 /// what lets an unchanged regeneration skip rewriting the file.
-fn withGeneratedHeader(allocator: std.mem.Allocator, io: std.Io, code: []const u8) ![]const u8 {
+fn withGeneratedHeader(allocator: std.mem.Allocator, code: []const u8) ![]const u8 {
     const normalized = try output_normalizer.normalize(allocator, code);
     defer allocator.free(normalized);
     const checksum = generated_header.computeChecksum(normalized);
-    const header = try generated_header.renderNowWithChecksum(allocator, io, checksum);
+    const header = try generated_header.renderFromBuildInfoWithChecksum(allocator, checksum);
     defer allocator.free(header);
     return try std.mem.concat(allocator, u8, &.{ header, normalized });
 }
@@ -274,16 +274,15 @@ pub fn generateApi(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, a
 ///
 /// Parameters:
 /// - allocator: Memory allocator to use for code generation
-/// - io: Standard I/O context for reading the generation timestamp
 ///
 /// Returns:
 /// - String containing the generated runtime Zig module, including the header
-pub fn generateRuntime(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+pub fn generateRuntime(allocator: std.mem.Allocator) ![]const u8 {
     var runtime_gen = RuntimeGenerator.init(allocator);
     defer runtime_gen.deinit();
     const runtime_code = try runtime_gen.generate();
     defer allocator.free(runtime_code);
-    return try withGeneratedHeader(allocator, io, runtime_code);
+    return try withGeneratedHeader(allocator, runtime_code);
 }
 
 fn rejectRuntimeOnlyConflicts(args: CliArgs) !void {
@@ -299,22 +298,21 @@ fn rejectRuntimeOnlyConflicts(args: CliArgs) !void {
 ///
 /// Parameters:
 /// - allocator: Memory allocator to use for code generation
-/// - io: Standard I/O context for reading the generation timestamp
 /// - unified_doc: The unified document containing schema and operation definitions
 /// - args: CLI arguments for customizing code generation
 ///
 /// Returns:
 /// - String containing complete generated Zig code
-pub fn generateCode(allocator: std.mem.Allocator, io: std.Io, unified_doc: UnifiedDocument, args: CliArgs) ![]const u8 {
+pub fn generateCode(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, args: CliArgs) ![]const u8 {
     if (args.runtime_only) {
         try rejectRuntimeOnlyConflicts(args);
-        return try generateRuntime(allocator, io);
+        return try generateRuntime(allocator);
     }
     const models_code = try generateModelsWithArgs(allocator, unified_doc, args);
     defer allocator.free(models_code);
 
     if (args.models_only) {
-        return try withGeneratedHeader(allocator, io, models_code);
+        return try withGeneratedHeader(allocator, models_code);
     }
 
     const api_code = try generateApi(allocator, unified_doc, args);
@@ -323,7 +321,7 @@ pub fn generateCode(allocator: std.mem.Allocator, io: std.Io, unified_doc: Unifi
     const combined = try std.mem.concat(allocator, u8, &.{ models_code, "\n", api_code });
     defer allocator.free(combined);
 
-    return try withGeneratedHeader(allocator, io, combined);
+    return try withGeneratedHeader(allocator, combined);
 }
 
 /// Result of generating code in multiple-files mode.
@@ -345,14 +343,14 @@ pub const GeneratedFiles = struct {
 /// to reuse an existing runtime module instead of generating one. When
 /// `args.runtime_only` is set, only the runtime file is generated (`models` is
 /// empty and `client` is null) and `unified_doc` is ignored.
-pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_doc: UnifiedDocument, args: CliArgs) !GeneratedFiles {
+pub fn generateCodeMultiple(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, args: CliArgs) !GeneratedFiles {
     if (args.runtime_only) {
         try rejectRuntimeOnlyConflicts(args);
         var runtime_gen = RuntimeGenerator.init(allocator);
         defer runtime_gen.deinit();
         const runtime_code = try runtime_gen.generate();
         defer allocator.free(runtime_code);
-        const runtime_with_header = try withGeneratedHeader(allocator, io, runtime_code);
+        const runtime_with_header = try withGeneratedHeader(allocator, runtime_code);
         errdefer allocator.free(runtime_with_header);
         const empty_models = try allocator.dupe(u8, "");
         return .{ .models = empty_models, .runtime = runtime_with_header, .client = null };
@@ -367,7 +365,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
     const models_code = try generateModelsWithArgs(allocator, unified_doc, args);
     defer allocator.free(models_code);
 
-    const models_with_header = try withGeneratedHeader(allocator, io, models_code);
+    const models_with_header = try withGeneratedHeader(allocator, models_code);
     errdefer allocator.free(models_with_header);
 
     if (args.models_only) {
@@ -435,7 +433,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
         const runtime_code = try runtime_gen.generate();
         defer allocator.free(runtime_code);
 
-        runtime_with_header = try withGeneratedHeader(allocator, io, runtime_code);
+        runtime_with_header = try withGeneratedHeader(allocator, runtime_code);
 
         runtime_alias_owned = try cli.deriveAlias(allocator, runtime_file, "runtime");
         const computed_import = if (std.fs.path.dirname(client_file)) |client_dir| blk: {
@@ -469,7 +467,7 @@ pub fn generateCodeMultiple(allocator: std.mem.Allocator, io: std.Io, unified_do
     const api_code = try api_gen.generateClientOnly(unified_doc);
     defer allocator.free(api_code);
 
-    const client_with_header = try withGeneratedHeader(allocator, io, api_code);
+    const client_with_header = try withGeneratedHeader(allocator, api_code);
     errdefer allocator.free(client_with_header);
 
     return .{
@@ -536,7 +534,6 @@ test "generateCodeMultiple with windows-style runtime_module normalizes separato
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
 
     const json =
         \\{
@@ -548,7 +545,7 @@ test "generateCodeMultiple with windows-style runtime_module normalizes separato
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
 
-    var result = try generateCodeMultiple(allocator, io, unified, .{
+    var result = try generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_module = "..\\shared\\my_runtime.zig",
     });
@@ -564,7 +561,6 @@ test "generateCodeMultiple honors custom file names and nested client paths" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
 
     const json =
         \\{
@@ -596,7 +592,7 @@ test "generateCodeMultiple honors custom file names and nested client paths" {
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
 
-    var result = try generateCodeMultiple(allocator, io, unified, .{
+    var result = try generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .multiple_files = true,
         .file_names = .{ .models = "gen\\models.zig", .runtime = "rt\\runtime.zig", .client = "sub\\client.zig" },
@@ -620,7 +616,6 @@ test "generateCodeMultiple with runtime_module honors custom models name and nes
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
 
     const json =
         \\{
@@ -632,7 +627,7 @@ test "generateCodeMultiple with runtime_module honors custom models name and nes
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
 
-    var result = try generateCodeMultiple(allocator, io, unified, .{
+    var result = try generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .multiple_files = true,
         .file_names = .{ .models = "contracts.zig", .client = "sub\\client.zig" },
@@ -652,7 +647,6 @@ test "generateCodeMultiple rejects reserved alias std" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -662,7 +656,7 @@ test "generateCodeMultiple rejects reserved alias std" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .file_names = .{ .models = "std.zig" },
     }));
@@ -672,7 +666,6 @@ test "generateCodeMultiple rejects duplicate alias derived from file names" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -682,7 +675,7 @@ test "generateCodeMultiple rejects duplicate alias derived from file names" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .file_names = .{ .models = "my-models.zig", .runtime = "my_models.zig" },
     }));
@@ -692,7 +685,6 @@ test "generateCodeMultiple rejects reserved alias via runtime_module" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -702,7 +694,7 @@ test "generateCodeMultiple rejects reserved alias via runtime_module" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_module = "../std.zig",
     }));
@@ -712,7 +704,6 @@ test "generateCodeMultiple rejects duplicate alias between models and runtime_mo
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -722,7 +713,7 @@ test "generateCodeMultiple rejects duplicate alias between models and runtime_mo
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .file_names = .{ .models = "runtime.zig" },
         .runtime_module = "../runtime.zig",
@@ -733,7 +724,6 @@ test "generateCodeMultiple rejects duplicate file name" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -743,7 +733,7 @@ test "generateCodeMultiple rejects duplicate file name" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .file_names = .{ .models = "foo.zig", .runtime = "foo.zig" },
     }));
@@ -753,7 +743,6 @@ test "generateCodeMultiple rejects runtime_module that resolves to models file" 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -763,7 +752,7 @@ test "generateCodeMultiple rejects runtime_module that resolves to models file" 
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .file_names = .{ .client = "sub/client.zig" },
         .runtime_module = "../models.zig",
@@ -774,7 +763,6 @@ test "generateCodeMultiple allows reserved alias when models_only" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -784,7 +772,7 @@ test "generateCodeMultiple allows reserved alias when models_only" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    var result = try generateCodeMultiple(allocator, io, unified, .{
+    var result = try generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .models_only = true,
         .file_names = .{ .models = "std.zig" },
@@ -798,7 +786,6 @@ test "generateCodeMultiple rejects absolute runtime_module path" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const io = std.testing.io;
     const json =
         \\{
         \\  "openapi": "3.0.0",
@@ -808,11 +795,11 @@ test "generateCodeMultiple rejects absolute runtime_module path" {
     ;
     var unified = try parseToUnified(allocator, json);
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_module = "/absolute/runtime.zig",
     }));
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_module = "C:runtime.zig",
     }));
@@ -822,7 +809,7 @@ test "generateRuntime writes the runtime module" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const code = try generateRuntime(allocator, std.testing.io);
+    const code = try generateRuntime(allocator);
     defer allocator.free(code);
     try std.testing.expect(std.mem.indexOf(u8, code, "pub fn Owned") != null);
     try std.testing.expect(std.mem.indexOf(u8, code, "pub const RawResponse") != null);
@@ -840,7 +827,7 @@ test "generateCode with runtime_only ignores the document" {
         \\}
     );
     defer unified.deinit(allocator);
-    const code = try generateCode(allocator, std.testing.io, unified, .{
+    const code = try generateCode(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_only = true,
     });
@@ -861,7 +848,7 @@ test "generateCode with runtime_only rejects conflicting options" {
         \\}
     );
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCode(allocator, std.testing.io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCode(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_only = true,
         .models_only = true,
@@ -880,7 +867,7 @@ test "generateCodeMultiple with runtime_only emits only runtime" {
         \\}
     );
     defer unified.deinit(allocator);
-    var result = try generateCodeMultiple(allocator, std.testing.io, unified, .{
+    var result = try generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_only = true,
         .file_names = .{ .runtime = "std.zig" },
@@ -903,7 +890,7 @@ test "generateCodeMultiple with runtime_only rejects conflicting options" {
         \\}
     );
     defer unified.deinit(allocator);
-    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, std.testing.io, unified, .{
+    try std.testing.expectError(error.InvalidArguments, generateCodeMultiple(allocator, unified, .{
         .input_path = "fixture.json",
         .runtime_only = true,
         .models_only = true,

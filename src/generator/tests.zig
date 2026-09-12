@@ -592,20 +592,35 @@ test "generateCodeFromUnifiedDocument overwrites unchanged file when force is se
     const first = try tmp.dir.readFileAlloc(std.testing.io, "out/api.zig", allocator, .unlimited);
     defer allocator.free(first);
 
-    // Sleep to ensure timestamp in header will differ (header uses second precision)
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(1100), .real);
+    // Generation is reproducible, so a rewrite cannot be observed by comparing
+    // the bytes before and after. Mark the file instead, in a way that leaves
+    // the header's checksum describing the code below it untouched: a run that
+    // decides nothing changed skips the write and the mark survives, and a run
+    // that rewrites the file drops it.
+    const marked = try std.mem.concat(allocator, u8, &.{ first, "// sentinel\n" });
+    defer allocator.free(marked);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/api.zig", .data = marked });
 
-    // Force overwrites even when unchanged, so second file should have a new timestamp header
+    try generateCodeFromUnifiedDocument(allocator, std.testing.io, tmp.dir, unified, .{
+        .input_path = "fixture.json",
+        .output_path = "out/api.zig",
+    });
+
+    const skipped = try tmp.dir.readFileAlloc(std.testing.io, "out/api.zig", allocator, .unlimited);
+    defer allocator.free(skipped);
+    try std.testing.expectEqualStrings(marked, skipped);
+
     try generateCodeFromUnifiedDocument(allocator, std.testing.io, tmp.dir, unified, .{
         .input_path = "fixture.json",
         .output_path = "out/api.zig",
         .force = true,
     });
 
-    const second = try tmp.dir.readFileAlloc(std.testing.io, "out/api.zig", allocator, .unlimited);
-    defer allocator.free(second);
+    const forced = try tmp.dir.readFileAlloc(std.testing.io, "out/api.zig", allocator, .unlimited);
+    defer allocator.free(forced);
 
-    try std.testing.expect(!std.mem.eql(u8, first, second));
+    // Rewritten, and byte-for-byte what the first run produced.
+    try std.testing.expectEqualStrings(first, forced);
 }
 
 test "generateMultipleFiles overwrites unchanged files when force is set" {
@@ -637,7 +652,21 @@ test "generateMultipleFiles overwrites unchanged files when force is set" {
     const first_models = try tmp.dir.readFileAlloc(std.testing.io, "out/models.zig", allocator, .unlimited);
     defer allocator.free(first_models);
 
-    try std.Io.sleep(std.testing.io, .fromMilliseconds(1100), .real);
+    // See the single-file force test above for why the rewrite is detected with
+    // a sentinel rather than by comparing bytes.
+    const marked = try std.mem.concat(allocator, u8, &.{ first_models, "// sentinel\n" });
+    defer allocator.free(marked);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/models.zig", .data = marked });
+
+    try generateMultipleFiles(allocator, std.testing.io, tmp.dir, unified, .{
+        .input_path = "fixture.json",
+        .multiple_files = true,
+        .output_path = "out",
+    });
+
+    const skipped_models = try tmp.dir.readFileAlloc(std.testing.io, "out/models.zig", allocator, .unlimited);
+    defer allocator.free(skipped_models);
+    try std.testing.expectEqualStrings(marked, skipped_models);
 
     try generateMultipleFiles(allocator, std.testing.io, tmp.dir, unified, .{
         .input_path = "fixture.json",
@@ -646,10 +675,10 @@ test "generateMultipleFiles overwrites unchanged files when force is set" {
         .force = true,
     });
 
-    const second_models = try tmp.dir.readFileAlloc(std.testing.io, "out/models.zig", allocator, .unlimited);
-    defer allocator.free(second_models);
+    const forced_models = try tmp.dir.readFileAlloc(std.testing.io, "out/models.zig", allocator, .unlimited);
+    defer allocator.free(forced_models);
 
-    try std.testing.expect(!std.mem.eql(u8, first_models, second_models));
+    try std.testing.expectEqualStrings(first_models, forced_models);
 }
 
 test "generateMultipleFiles with runtime_module reuses existing runtime" {

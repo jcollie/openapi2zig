@@ -20,7 +20,7 @@ fn generate(allocator: std.mem.Allocator, enums: bool) ![]const u8 {
     var document = try openapi2zig.parseToUnified(allocator, contents);
     defer document.deinit(allocator);
 
-    return try openapi2zig.generateCode(allocator, std.testing.io, document, .{
+    return try openapi2zig.generateCode(allocator, document, .{
         .input_path = "openapi/v3.0/enums.json",
         .parameters_as_struct = true,
         .generate_enums = enums,
