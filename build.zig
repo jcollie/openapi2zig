@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const run_integration_tests = b.option(bool, "run-integration", "Run network integration tests") orelse false;
     const build_info = createBuildInfoOptions(b, run_integration_tests);
-    const package_snapshot_step = createPackageSnapshotStep(b);
+    const package_snapshot = addPackageSnapshot(b);
     const yaml_dep = b.dependency("yaml", .{
         .target = target,
         .optimize = optimize,
@@ -112,9 +112,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -483,8 +481,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_multi_generated_tests.step);
 
     const test_package_cmd = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
-    test_package_cmd.step.dependOn(package_snapshot_step);
-    test_package_cmd.setCwd(b.path(".zig-cache/package-snapshot/examples/package_consumer"));
+    test_package_cmd.setCwd(package_snapshot.path(b, "examples/package_consumer"));
     const test_package_step = b.step("test-package", "Build downstream package consumer example");
     test_package_step.dependOn(&test_package_cmd.step);
     test_step.dependOn(&test_package_cmd.step);
@@ -504,12 +501,17 @@ fn createBuildInfoOptions(b: *std.Build, run_integration_tests: bool) *std.Build
     // its own directory as the working directory, so read the version and the
     // git metadata from the package root rather than from wherever the build
     // was started; otherwise generated headers claim the consumer's version.
-    const build_root = b.build_root.path orelse ".";
+    const build_root = buildRootPath(b);
     const package_version = getPackageVersion(b, io) orelse "unknown";
     // Only ask git when the package root is a checkout of its own. A fetched
     // package is unpacked inside the dependent's project, where git would
     // happily describe *that* repository instead of this one.
     const git_checkout = isGitCheckout(b, build_root);
+    // The build configuration is cached, and nothing tells the cache that a
+    // commit or a new tag changes what git reports. Poisoning it makes `zig
+    // build` configure afresh every time in a checkout; a fetched package asks
+    // git nothing and stays cacheable.
+    if (git_checkout) b.graph.poisonCache();
     const git_tag = (if (git_checkout)
         getGitOutput(b.allocator, io, &.{ "git", "-C", build_root, "describe", "--tags", "--abbrev=0" })
     else
@@ -536,45 +538,33 @@ fn createBuildInfoOptions(b: *std.Build, run_integration_tests: bool) *std.Build
     return options;
 }
 
-fn createPackageSnapshotStep(b: *std.Build) *std.Build.Step {
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "prepare-package-snapshot",
-        .owner = b,
-        .makeFn = makePackageSnapshot,
-    });
-    return step;
+/// Copies the package's files into a directory of their own, so that the
+/// package consumer example builds against the package as a dependent sees it.
+/// The file list comes from git at make time, so the step always runs.
+fn addPackageSnapshot(b: *std.Build) std.Build.LazyPath {
+    const snapshot = b.addRunArtifact(addHostTool(b, "package_snapshot", "tools/package_snapshot.zig"));
+    snapshot.setName("prepare-package-snapshot");
+    snapshot.setCwd(b.path("."));
+    snapshot.has_side_effects = true;
+    return snapshot.addOutputDirectoryArg("package-snapshot");
 }
 
-fn makePackageSnapshot(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
-    _ = options;
-    const b = step.owner;
-    const allocator = b.allocator;
-    const io = b.graph.io;
-    const cwd = std.Io.Dir.cwd();
-    const snapshot_root = ".zig-cache/package-snapshot";
+/// Builds one of the programs in `tools/` for the machine running the build.
+fn addHostTool(b: *std.Build, name: []const u8, root_source_file: []const u8) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root_source_file),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+}
 
-    try cwd.deleteTree(io, snapshot_root);
-    try cwd.createDirPath(io, snapshot_root);
-
-    const repo_files = getPackageSnapshotFiles(allocator, io) orelse return error.UnableToPreparePackageSnapshot;
-    defer allocator.free(repo_files);
-
-    var lines = std.mem.tokenizeScalar(u8, repo_files, '\n');
-    while (lines.next()) |line| {
-        const repo_path = std.mem.trimEnd(u8, line, "\r");
-        if (repo_path.len == 0) continue;
-
-        const destination_path = try std.fs.path.join(allocator, &.{ snapshot_root, repo_path });
-        defer allocator.free(destination_path);
-
-        if (std.fs.path.dirname(destination_path)) |dest_dir| {
-            try cwd.createDirPath(io, dest_dir);
-        }
-
-        try cwd.copyFile(repo_path, cwd, destination_path, io, .{});
-    }
+/// The package root as a path git can be pointed at.
+fn buildRootPath(b: *std.Build) []const u8 {
+    const root = b.root.toString(b.allocator) catch @panic("OOM");
+    return if (root.len == 0) "." else root;
 }
 
 /// True when `dir` holds a `.git` of its own: a directory in a normal clone,
@@ -588,34 +578,14 @@ fn isGitCheckout(b: *std.Build, dir: []const u8) bool {
 
 fn getPackageVersion(b: *std.Build, io: std.Io) ?[]const u8 {
     const allocator = b.allocator;
-    const path = b.pathFromRoot("build.zig.zon");
+    b.dependOnFileContents(b.path("build.zig.zon"));
+    const path = b.root.joinString(allocator, "build.zig.zon") catch @panic("OOM");
     const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024)) catch return null;
     const marker = ".version = \"";
     const start = std.mem.indexOf(u8, content, marker) orelse return null;
     const version_start = start + marker.len;
     const version_end = std.mem.indexOfScalarPos(u8, content, version_start, '"') orelse return null;
     return content[version_start..version_end];
-}
-
-fn getPackageSnapshotFiles(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
-    return getGitOutput(allocator, io, &.{
-        "git",
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "--",
-        "build.zig",
-        "build.zig.zon",
-        "src",
-        "resources",
-        "openapi",
-        "generated",
-        "vendor/zig-yaml",
-        "LICENSE",
-        "README.md",
-        "examples/package_consumer",
-    });
 }
 
 fn addInstallStep(
@@ -629,7 +599,12 @@ fn addInstallStep(
 ) void {
     const exe = addOpenApi2ZigExecutable(b, "openapi2zig", target, optimize, build_info, yaml_dep);
     const install_step = b.step(step_name, description);
-    const install = InstallReleaseStep.create(b, @tagName(optimize), exe.getEmittedBin(), getInstallPrefix(b), exe.out_filename);
+    const install = b.addRunArtifact(addHostTool(b, "install_release", "tools/install_release.zig"));
+    install.setName(b.fmt("install {s} ({t})", .{ exe.out_filename, optimize }));
+    install.addArtifactArg2(exe, .{ .make_absolute = true });
+    install.addDirectoryArg2(b.graph.path(.install_prefix, ""), .{ .make_absolute = true });
+    install.addFileArg2(b.path("build.zig"), .{ .make_absolute = true });
+    install.has_side_effects = true;
     install_step.dependOn(&install.step);
 }
 
@@ -673,65 +648,6 @@ fn addOpenApi2ZigExecutable(
 fn addApplicationIcon(b: *std.Build, module: *std.Build.Module) void {
     module.addWin32ResourceFile(.{ .file = b.path("resources/openapi2zig.rc") });
 }
-
-fn getInstallPrefix(b: *std.Build) []const u8 {
-    const default_prefix = b.build_root.join(b.allocator, &.{"zig-out"}) catch @panic("OOM");
-    if (!std.mem.eql(u8, b.install_prefix, default_prefix)) {
-        return b.install_prefix;
-    }
-
-    if (b.graph.environ_map.get("INSTALL_DIR")) |install_dir| {
-        if (install_dir.len > 0) return install_dir;
-    }
-
-    if (b.graph.environ_map.get("HOME")) |home| {
-        if (home.len > 0) return b.pathJoin(&.{ home, ".local", "bin" });
-    }
-    if (b.graph.environ_map.get("USERPROFILE")) |home| {
-        if (home.len > 0) return b.pathJoin(&.{ home, ".local", "bin" });
-    }
-
-    @panic("unable to determine install directory: set HOME, USERPROFILE, or INSTALL_DIR");
-}
-
-const InstallReleaseStep = struct {
-    step: std.Build.Step,
-    source: std.Build.LazyPath,
-    dest_dir: []const u8,
-    dest_name: []const u8,
-
-    fn create(
-        b: *std.Build,
-        label: []const u8,
-        source: std.Build.LazyPath,
-        dest_dir: []const u8,
-        dest_name: []const u8,
-    ) *InstallReleaseStep {
-        const self = b.allocator.create(InstallReleaseStep) catch @panic("OOM");
-        self.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = b.fmt("install {s} ({s}) to {s}", .{ dest_name, label, dest_dir }),
-                .owner = b,
-                .makeFn = make,
-            }),
-            .source = source.dupe(b),
-            .dest_dir = b.dupePath(dest_dir),
-            .dest_name = b.dupePath(dest_name),
-        };
-        source.addStepDependencies(&self.step);
-        return self;
-    }
-
-    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-        _ = options;
-        const b = step.owner;
-        const self: *InstallReleaseStep = @fieldParentPtr("step", step);
-        const dest_path = b.pathResolve(&.{ self.dest_dir, self.dest_name });
-        const p = try step.installFile(self.source, dest_path);
-        step.result_cached = p == .fresh;
-    }
-};
 
 fn getGitOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) ?[]const u8 {
     const result = std.process.run(allocator, io, .{

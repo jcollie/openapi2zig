@@ -760,7 +760,8 @@ test "options type and field name caches release memory when allocation fails" {
     var document = try buildFixture(gpa.allocator());
     defer document.deinit(gpa.allocator());
 
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkOptionsCacheGeneration, .{document});
+    var no_grow: test_utils.NoGrowAllocator = .{ .backing = std.testing.allocator };
+    try std.testing.checkAllAllocationFailures(no_grow.allocator(), checkOptionsCacheGeneration, .{document});
 }
 
 /// A document whose query parameters are arrays, which is how a filter that
