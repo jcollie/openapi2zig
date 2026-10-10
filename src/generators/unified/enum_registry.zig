@@ -72,7 +72,7 @@ pub const EnumRegistry = struct {
             try buffer.appendSlice(self.allocator, " = enum {\n");
             for (entry.values) |value| {
                 try buffer.appendSlice(self.allocator, "    ");
-                try ident.appendIdentifier(buffer, self.allocator, value);
+                try ident.appendFieldIdentifier(buffer, self.allocator, value);
                 try buffer.appendSlice(self.allocator, ",\n");
             }
             try buffer.appendSlice(self.allocator, "};\n\n");

@@ -37,11 +37,14 @@ test "a choice list becomes an enum whose tags are the wire values" {
     defer allocator.free(code);
 
     // The union of both spellings of the id, so the tag a filter needs is
-    // present on the type a response uses. `null` is a keyword and escapes.
+    // present on the type a response uses. `null` is a keyword, but like
+    // `true`, `false` and `undefined` it is a legal tag left bare, and
+    // `zig fmt` rewrites `@"null"` to `null`, so writing it escaped would
+    // leave the output non-canonical.
     try std.testing.expect(std.mem.indexOf(u8, code,
         \\pub const PriorityEnum = enum {
         \\    inactive,
-        \\    @"null",
+        \\    null,
         \\    primary,
         \\    secondary,
         \\    tertiary,
