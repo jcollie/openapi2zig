@@ -314,3 +314,50 @@ test "camel-case operation names lowercase functions and capitalize parameter ty
 
     try testing.expect(std.mem.indexOf(u8, code, "Options") == null);
 }
+
+// Forgejo's renderMarkdown owns renderMarkdownRaw through its Raw form, which
+// is also the operation id of the operation next to it.
+const spec_with_raw_form_collision =
+    \\{
+    \\  "openapi": "3.0.0",
+    \\  "info": { "title": "Naming", "version": "1.0.0" },
+    \\  "paths": {
+    \\    "/markdown": {
+    \\      "post": {
+    \\        "operationId": "renderMarkdown",
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    },
+    \\    "/markdown/raw": {
+    \\      "post": {
+    \\        "operationId": "renderMarkdownRaw",
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    }
+    \\  }
+    \\}
+;
+
+test "an operation name override resolves a collision without a suffix" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const suffixed = try generateClient(allocator, spec_with_raw_form_collision, .{ .input_path = "fixture.json" });
+    defer allocator.free(suffixed);
+    try testing.expect(std.mem.indexOf(u8, suffixed, "pub fn renderMarkdownRaw_(client: *Client) ") != null);
+
+    const code = try generateClient(allocator, spec_with_raw_form_collision, .{
+        .input_path = "fixture.json",
+        // Applied as given: camel-case does not touch an override.
+        .operation_names = .camel_case,
+        .operation_name_overrides = &.{.{ .operation_id = "renderMarkdownRaw", .name = "RenderRawMarkdown" }},
+    });
+    defer allocator.free(code);
+
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn renderMarkdown(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn renderMarkdownRaw(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn RenderRawMarkdown(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn RenderRawMarkdownRaw(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "renderMarkdownRaw_") == null);
+}

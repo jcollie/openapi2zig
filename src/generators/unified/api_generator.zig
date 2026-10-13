@@ -172,9 +172,12 @@ pub const UnifiedApiGenerator = struct {
             const operation_id = op_ref.operation.operationId orelse continue;
             if (self.operation_names.contains(operation_id)) continue;
 
-            var name = try ident.toZigMethodNameAlloc(self.allocator, operation_id);
+            var name = if (self.nameOverrideFor(operation_id)) |override|
+                try self.allocator.dupe(u8, override)
+            else
+                try ident.toZigMethodNameAlloc(self.allocator, operation_id);
             errdefer self.allocator.free(name);
-            if (self.args.operation_names == .camel_case and name.len > 0) {
+            if (self.args.operation_names == .camel_case and name.len > 0 and self.nameOverrideFor(operation_id) == null) {
                 // Owned by this allocation, so it can be edited in place; a
                 // leading '_' or '@' is left alone.
                 @constCast(name)[0] = std.ascii.toLower(name[0]);
@@ -189,6 +192,13 @@ pub const UnifiedApiGenerator = struct {
             errdefer self.allocator.free(key);
             try self.operation_names.put(key, name);
         }
+    }
+
+    fn nameOverrideFor(self: *UnifiedApiGenerator, operation_id: []const u8) ?[]const u8 {
+        for (self.args.operation_name_overrides) |override| {
+            if (std.mem.eql(u8, override.operation_id, operation_id)) return override.name;
+        }
+        return null;
     }
 
     fn declarationsClaimed(self: *UnifiedApiGenerator, claimed: *std.StringHashMap(void), name: []const u8) !bool {

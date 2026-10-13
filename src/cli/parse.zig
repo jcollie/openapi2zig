@@ -5,6 +5,7 @@ const fnames = @import("file_names.zig");
 const ResourceWrapperMode = types.ResourceWrapperMode;
 const MultipleClientsMode = types.MultipleClientsMode;
 const OperationNameMode = types.OperationNameMode;
+const OperationNameOverride = types.OperationNameOverride;
 const FileKind = types.FileKind;
 const FileNameOverrides = types.FileNameOverrides;
 const CliArgs = types.CliArgs;
@@ -70,6 +71,10 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var parameters_as_struct = false;
     var params_suffix: ?[]const u8 = null;
     var operation_names: ?OperationNameMode = null;
+    var name_overrides_list = std.ArrayList(OperationNameOverride).empty;
+    defer name_overrides_list.deinit(allocator);
+    var name_overrides: []const OperationNameOverride = &.{};
+    var name_overrides_owned = false;
     var generate_enums = false;
 
     var i: usize = 2;
@@ -224,6 +229,29 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
                 return error.InvalidArguments;
             }
             params_suffix = args[i];
+        } else if (std.mem.eql(u8, arg, "--operation-name")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--operation-name value required\n", .{});
+                return error.InvalidArguments;
+            }
+            const value = args[i];
+            const eq = std.mem.indexOfScalar(u8, value, '=') orelse 0;
+            const name = if (eq == 0) "" else value[eq + 1 ..];
+            if (eq == 0 or !isIdentifierSuffix(name) or std.ascii.isDigit(name[0])) {
+                printUsage();
+                printError("invalid --operation-name '{s}', expected <operationId>=<identifier>\n", .{value});
+                return error.InvalidArguments;
+            }
+            for (name_overrides_list.items) |existing| {
+                if (std.mem.eql(u8, existing.operation_id, value[0..eq])) {
+                    printUsage();
+                    printError("duplicate --operation-name for '{s}'\n", .{value[0..eq]});
+                    return error.InvalidArguments;
+                }
+            }
+            try name_overrides_list.append(allocator, .{ .operation_id = value[0..eq], .name = name });
         } else if (std.mem.eql(u8, arg, "--operation-names")) {
             i += 1;
             if (i >= args.len) {
@@ -293,6 +321,11 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
         if (operation_names != null) {
             printUsage();
             printError("--operation-names has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (name_overrides_list.items.len > 0) {
+            printUsage();
+            printError("--operation-name has no effect with --runtime-only\n", .{});
             return error.InvalidArguments;
         }
         if (resource_wrappers_explicit) {
@@ -430,6 +463,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     }
     errdefer if (tags_owned) allocator.free(tags);
 
+    if (name_overrides_list.items.len > 0) {
+        name_overrides = try name_overrides_list.toOwnedSlice(allocator);
+        name_overrides_owned = true;
+    }
+    errdefer if (name_overrides_owned) allocator.free(name_overrides);
+
     return .{
         .args = .{
             .input_path = input_path orelse "",
@@ -448,6 +487,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .parameters_as_struct = parameters_as_struct,
             .params_suffix = params_suffix orelse "Options",
             .operation_names = operation_names orelse .preserve,
+            .operation_name_overrides = name_overrides,
+            .owns_operation_name_overrides = name_overrides_owned,
             .generate_enums = generate_enums,
         },
     };

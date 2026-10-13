@@ -30,6 +30,13 @@ pub const OperationNameMode = enum {
     camel_case,
 };
 
+/// The declaration name to give one operation in place of the one derived
+/// from its operation id.
+pub const OperationNameOverride = struct {
+    operation_id: []const u8,
+    name: []const u8,
+};
+
 pub const FileKind = enum {
     models,
     runtime,
@@ -115,6 +122,13 @@ pub const CliArgs = struct {
     /// `parameters_as_struct` is set.
     params_suffix: []const u8 = "Options",
     operation_names: OperationNameMode = .preserve,
+    /// Names to use for particular operations, by operation id, exactly as
+    /// given: `operation_names` does not apply to them. For resolving a
+    /// collision without the underscore suffix it would otherwise get.
+    /// The slice is freed by `deinit(allocator)` when
+    /// `owns_operation_name_overrides` is true.
+    operation_name_overrides: []const OperationNameOverride = &.{},
+    owns_operation_name_overrides: bool = false,
     /// Turn a schema's `enum` into a Zig enum rather than `[]const u8`. Off by
     /// default, because it changes the type of every field carrying one.
     generate_enums: bool = false,
@@ -123,6 +137,9 @@ pub const CliArgs = struct {
         if (self.owns_tags) allocator.free(self.tags);
         self.tags = &.{};
         self.owns_tags = false;
+        if (self.owns_operation_name_overrides) allocator.free(self.operation_name_overrides);
+        self.operation_name_overrides = &.{};
+        self.owns_operation_name_overrides = false;
     }
 };
 

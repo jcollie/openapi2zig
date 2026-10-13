@@ -55,6 +55,9 @@ pub fn printUsage() void {
         \\   --operation-names <mode>  preserve: keep operation ids as written (default)
         \\                            camel-case: lowercase function names and capitalize
         \\                            parameters struct names, whatever the spec's case
+        \\   --operation-name <id>=<name>
+        \\                            Name the operation <id> <name>, exactly as given.
+        \\                            Can be specified multiple times.
         \\   --enums                   Generate a Zig enum for each schema `enum`
         \\
         \\ EXAMPLES:

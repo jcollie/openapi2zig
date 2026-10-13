@@ -815,6 +815,25 @@ test "parse generate supports params-suffix and operation-names" {
     try std.testing.expectEqual(.camel_case, parsed.args.operation_names);
 }
 
+test "parse generate collects operation-name overrides" {
+    const argv = [_][:0]const u8{
+        "openapi2zig",      "generate",
+        "-i",               "openapi.json",
+        "--operation-name", "renderMarkdownRaw=renderRawMarkdown",
+        "--operation-name", "ActionRun=getActionRun",
+    };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    const overrides = parsed.args.operation_name_overrides;
+    try std.testing.expectEqual(@as(usize, 2), overrides.len);
+    try std.testing.expectEqualStrings("renderMarkdownRaw", overrides[0].operation_id);
+    try std.testing.expectEqualStrings("renderRawMarkdown", overrides[0].name);
+    try std.testing.expectEqualStrings("ActionRun", overrides[1].operation_id);
+    try std.testing.expectEqualStrings("getActionRun", overrides[1].name);
+}
+
 test "parse generate rejects bad naming options" {
     const cases = [_][]const [:0]const u8{
         // A suffix only means something on a parameters struct.
@@ -827,6 +846,13 @@ test "parse generate rejects bad naming options" {
         &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-names" },
         &.{ "openapi2zig", "generate", "--runtime-only", "--operation-names", "camel-case" },
         &.{ "openapi2zig", "generate", "--runtime-only", "--params-suffix", "Params" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "=renderRawMarkdown" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=2render" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=render-raw" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "a=b", "--operation-name", "a=c" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--operation-name", "a=b" },
     };
     for (cases) |argv| {
         try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, argv));
