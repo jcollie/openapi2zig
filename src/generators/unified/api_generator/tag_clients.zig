@@ -38,26 +38,41 @@ pub fn generateTagClients(self: *UnifiedApiGenerator, document: UnifiedDocument)
         groups.deinit(self.allocator);
     }
 
+    // An operation belongs to the client of every tag it carries, not just
+    // the first: a spec that files an operation under two tags means it to be
+    // found under both. Untagged operations land in DefaultClient.
     for (operations.items) |op_ref| {
-        const struct_name = try self.tagClientNameAlloc(op_ref.operation);
+        const tags: []const []const u8 = if (op_ref.operation.tags) |tags| tags else &.{};
+        const tag_count = @max(tags.len, 1);
+        for (0..tag_count) |tag_index| {
+            const tag = if (tags.len == 0) "" else tags[tag_index];
+            const struct_name = try self.tagClientNameAlloc(tag);
 
-        var group_index: ?usize = null;
-        for (groups.items, 0..) |group, i| {
-            if (std.mem.eql(u8, group.name, struct_name)) {
-                group_index = i;
-                break;
+            var group_index: ?usize = null;
+            for (groups.items, 0..) |group, i| {
+                if (std.mem.eql(u8, group.name, struct_name)) {
+                    group_index = i;
+                    break;
+                }
             }
-        }
 
-        if (group_index) |idx| {
-            self.allocator.free(struct_name);
-            try groups.items[idx].methods.append(self.allocator, op_ref);
-        } else {
-            errdefer self.allocator.free(struct_name);
-            var methods = std.ArrayList(OperationRef).empty;
-            errdefer methods.deinit(self.allocator);
-            try methods.append(self.allocator, op_ref);
-            try groups.append(self.allocator, .{ .name = struct_name, .methods = methods });
+            if (group_index) |idx| {
+                self.allocator.free(struct_name);
+                // A tag repeated, or two tags that name the same client, must
+                // not add the operation to it twice.
+                const methods = &groups.items[idx].methods;
+                if (methods.items.len > 0) {
+                    const last = methods.items[methods.items.len - 1];
+                    if (std.mem.eql(u8, last.path, op_ref.path) and std.mem.eql(u8, last.method, op_ref.method)) continue;
+                }
+                try methods.append(self.allocator, op_ref);
+            } else {
+                errdefer self.allocator.free(struct_name);
+                var methods = std.ArrayList(OperationRef).empty;
+                errdefer methods.deinit(self.allocator);
+                try methods.append(self.allocator, op_ref);
+                try groups.append(self.allocator, .{ .name = struct_name, .methods = methods });
+            }
         }
     }
 
@@ -480,8 +495,8 @@ pub fn tagClientFallbackMethodNameAlloc(self: *UnifiedApiGenerator, op_ref: Oper
     return method;
 }
 
-pub fn tagClientNameAlloc(self: *UnifiedApiGenerator, operation: Operation) ![]const u8 {
-    const tag: []const u8 = if (operation.tags) |tags| (if (tags.len > 0) tags[0] else "") else "";
+/// The client struct name for `tag`; the empty tag names DefaultClient.
+pub fn tagClientNameAlloc(self: *UnifiedApiGenerator, tag: []const u8) ![]const u8 {
     if (tag.len == 0) return try self.allocator.dupe(u8, "DefaultClient");
     const pascal = try toPascalCaseAlloc(self.allocator, tag);
     defer self.allocator.free(pascal);
