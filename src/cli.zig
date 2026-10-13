@@ -8,6 +8,7 @@ pub const printError = usage.printError;
 const types = @import("cli/types.zig");
 pub const ResourceWrapperMode = types.ResourceWrapperMode;
 pub const MultipleClientsMode = types.MultipleClientsMode;
+pub const OperationNameMode = types.OperationNameMode;
 pub const FileKind = types.FileKind;
 pub const FileNameOverrides = types.FileNameOverrides;
 pub const CliArgs = types.CliArgs;
@@ -32,6 +33,7 @@ const parse_mod = @import("cli/parse.zig");
 pub const parse = parse_mod.parse;
 pub const parseResourceWrapperMode = parse_mod.parseResourceWrapperMode;
 pub const parseMultipleClientsMode = parse_mod.parseMultipleClientsMode;
+pub const parseOperationNameMode = parse_mod.parseOperationNameMode;
 
 test {
     _ = @import("cli/tests.zig");

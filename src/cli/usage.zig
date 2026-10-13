@@ -49,8 +49,13 @@ pub fn printUsage() void {
         \\                              (default output: runtime.zig)
         \\   --force                   Force overwriting output even when unchanged
         \\   --parameters-as-struct    Wrap method parameters in a single options struct
-        \\   --enums                   Generate a Zig enum for each schema `enum`
         \\                            instead of individual function arguments
+        \\   --params-suffix <suffix>  Suffix of each parameters struct's type name
+        \\                            (default: Options)
+        \\   --operation-names <mode>  preserve: keep operation ids as written (default)
+        \\                            camel-case: lowercase function names and capitalize
+        \\                            parameters struct names, whatever the spec's case
+        \\   --enums                   Generate a Zig enum for each schema `enum`
         \\
         \\ EXAMPLES:
         \\   openapi2zig generate -i ./openapi/petstore.json -o api.zig

@@ -4,6 +4,7 @@ const usage = @import("usage.zig");
 const fnames = @import("file_names.zig");
 const ResourceWrapperMode = types.ResourceWrapperMode;
 const MultipleClientsMode = types.MultipleClientsMode;
+const OperationNameMode = types.OperationNameMode;
 const FileKind = types.FileKind;
 const FileNameOverrides = types.FileNameOverrides;
 const CliArgs = types.CliArgs;
@@ -67,6 +68,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var force = false;
     var runtime_only = false;
     var parameters_as_struct = false;
+    var params_suffix: ?[]const u8 = null;
+    var operation_names: ?OperationNameMode = null;
     var generate_enums = false;
 
     var i: usize = 2;
@@ -203,6 +206,41 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             runtime_only = true;
         } else if (std.mem.eql(u8, arg, "--parameters-as-struct")) {
             parameters_as_struct = true;
+        } else if (std.mem.eql(u8, arg, "--params-suffix")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--params-suffix value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (params_suffix != null) {
+                printUsage();
+                printError("duplicate --params-suffix\n", .{});
+                return error.InvalidArguments;
+            }
+            if (!isIdentifierSuffix(args[i])) {
+                printUsage();
+                printError("invalid --params-suffix '{s}', expected letters, digits and underscores\n", .{args[i]});
+                return error.InvalidArguments;
+            }
+            params_suffix = args[i];
+        } else if (std.mem.eql(u8, arg, "--operation-names")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--operation-names value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (operation_names != null) {
+                printUsage();
+                printError("duplicate --operation-names\n", .{});
+                return error.InvalidArguments;
+            }
+            operation_names = parseOperationNameMode(args[i]) orelse {
+                printUsage();
+                printError("invalid --operation-names mode '{s}', expected preserve or camel-case\n", .{args[i]});
+                return error.InvalidArguments;
+            };
         } else if (std.mem.eql(u8, arg, "--enums")) {
             generate_enums = true;
         }
@@ -247,6 +285,16 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             printError("--parameters-as-struct has no effect with --runtime-only\n", .{});
             return error.InvalidArguments;
         }
+        if (params_suffix != null) {
+            printUsage();
+            printError("--params-suffix has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (operation_names != null) {
+            printUsage();
+            printError("--operation-names has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
         if (resource_wrappers_explicit) {
             printUsage();
             printError("--resource-wrappers has no effect with --runtime-only\n", .{});
@@ -268,6 +316,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     if (runtime_module != null and !multiple_files) {
         printUsage();
         printError("--runtime-module requires --multiple-files\n", .{});
+        return error.InvalidArguments;
+    }
+
+    if (params_suffix != null and !parameters_as_struct and !runtime_only) {
+        printUsage();
+        printError("--params-suffix requires --parameters-as-struct\n", .{});
         return error.InvalidArguments;
     }
 
@@ -392,6 +446,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .force = force,
             .runtime_only = runtime_only,
             .parameters_as_struct = parameters_as_struct,
+            .params_suffix = params_suffix orelse "Options",
+            .operation_names = operation_names orelse .preserve,
             .generate_enums = generate_enums,
         },
     };
@@ -422,4 +478,31 @@ pub fn parseMultipleClientsMode(value: []const u8) ?MultipleClientsMode {
     if (std.mem.eql(u8, key, "pertag")) return .per_tag;
     if (std.mem.eql(u8, key, "perendpoint")) return .per_endpoint;
     return null;
+}
+
+/// Parse an --operation-names mode value, ignoring case and treating '-' and
+/// '_' alike, so camel-case, camel_case and CamelCase all resolve.
+pub fn parseOperationNameMode(value: []const u8) ?OperationNameMode {
+    var buf: [64]u8 = undefined;
+    if (value.len == 0 or value.len > buf.len) return null;
+    var n: usize = 0;
+    for (value) |c| {
+        const lower = std.ascii.toLower(c);
+        if (lower == '-' or lower == '_') continue;
+        buf[n] = lower;
+        n += 1;
+    }
+    const key = buf[0..n];
+    if (std.mem.eql(u8, key, "preserve")) return .preserve;
+    if (std.mem.eql(u8, key, "camelcase")) return .camel_case;
+    return null;
+}
+
+/// Whether `value` can follow an identifier and leave it an identifier.
+fn isIdentifierSuffix(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
 }

@@ -789,6 +789,50 @@ test "parse generate defaults parameters-as-struct to false" {
     try std.testing.expect(!parsed.args.parameters_as_struct);
 }
 
+test "parse generate defaults the naming options" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json" };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Options", parsed.args.params_suffix);
+    try std.testing.expectEqual(.preserve, parsed.args.operation_names);
+}
+
+test "parse generate supports params-suffix and operation-names" {
+    const argv = [_][:0]const u8{
+        "openapi2zig",            "generate",
+        "-i",                     "openapi.json",
+        "--parameters-as-struct", "--params-suffix",
+        "Params",                 "--operation-names",
+        "camel-case",
+    };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Params", parsed.args.params_suffix);
+    try std.testing.expectEqual(.camel_case, parsed.args.operation_names);
+}
+
+test "parse generate rejects bad naming options" {
+    const cases = [_][]const [:0]const u8{
+        // A suffix only means something on a parameters struct.
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--params-suffix", "Params" },
+        // It has to leave the type name an identifier.
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix", "Par-ams" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix", "A", "--params-suffix", "B" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-names", "snake" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-names" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--operation-names", "camel-case" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--params-suffix", "Params" },
+    };
+    for (cases) |argv| {
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, argv));
+    }
+}
+
 test "parse accepts --runtime-module with --multiple-files" {
     const argv = [_][:0]const u8{
         "openapi2zig",

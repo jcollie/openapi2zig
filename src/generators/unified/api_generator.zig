@@ -174,6 +174,11 @@ pub const UnifiedApiGenerator = struct {
 
             var name = try ident.toZigMethodNameAlloc(self.allocator, operation_id);
             errdefer self.allocator.free(name);
+            if (self.args.operation_names == .camel_case and name.len > 0) {
+                // Owned by this allocation, so it can be edited in place; a
+                // leading '_' or '@' is left alone.
+                @constCast(name)[0] = std.ascii.toLower(name[0]);
+            }
             while (try self.declarationsClaimed(&claimed, name)) {
                 const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{name});
                 self.allocator.free(name);
@@ -347,6 +352,7 @@ pub const UnifiedApiGenerator = struct {
     pub const optionsTypeKeyAlloc = @import("api_generator/options.zig").optionsTypeKeyAlloc;
     pub const appendOptionsTypeName = @import("api_generator/options.zig").appendOptionsTypeName;
     pub const appendRawOptionsTypeName = @import("api_generator/options.zig").appendRawOptionsTypeName;
+    pub const optionsTypeBaseNameAlloc = @import("api_generator/options.zig").optionsTypeBaseNameAlloc;
     pub const generateOptionsType = @import("api_generator/options.zig").generateOptionsType;
     pub const appendBodyParams = @import("api_generator/options.zig").appendBodyParams;
     pub const optionsFieldNameAlloc = @import("api_generator/options.zig").optionsFieldNameAlloc;

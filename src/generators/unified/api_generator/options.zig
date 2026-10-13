@@ -97,15 +97,26 @@ pub fn appendOptionsTypeName(self: *UnifiedApiGenerator, operation: Operation, m
 }
 
 pub fn appendRawOptionsTypeName(self: *UnifiedApiGenerator, operation: Operation, path: []const u8) !void {
-    if (self.operationNameOf(operation)) |op_id| {
-        const name = try std.fmt.allocPrint(self.allocator, "{s}Options", .{op_id});
-        defer self.allocator.free(name);
+    const name = try self.optionsTypeBaseNameAlloc(operation, path);
+    defer self.allocator.free(name);
+    if (self.operationNameOf(operation) != null) {
         try self.appendIdentifier(name);
     } else {
-        const name = try std.fmt.allocPrint(self.allocator, "operation{s}Options", .{path[1..]});
-        defer self.allocator.free(name);
         try self.appendEscapedIdentifier(name);
     }
+}
+
+/// The type name an operation's parameters struct is given before any
+/// collision suffix: the operation name, or `operation` and the path when it
+/// has none, followed by the configured suffix. With camel-case operation
+/// names the first letter is capitalized, since the name is a type's.
+pub fn optionsTypeBaseNameAlloc(self: *UnifiedApiGenerator, operation: Operation, path: []const u8) ![]u8 {
+    const name = if (self.operationNameOf(operation)) |op_id|
+        try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ op_id, self.args.params_suffix })
+    else
+        try std.fmt.allocPrint(self.allocator, "operation{s}{s}", .{ path[1..], self.args.params_suffix });
+    if (self.args.operation_names == .camel_case and name.len > 0) name[0] = std.ascii.toUpper(name[0]);
+    return name;
 }
 
 /// Emit a top-level declaration of the options struct type for an
@@ -122,10 +133,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
     }
     if (count == 0) return;
 
-    var candidate = if (self.operationNameOf(operation)) |op_id|
-        try std.fmt.allocPrint(self.allocator, "{s}Options", .{op_id})
-    else
-        try std.fmt.allocPrint(self.allocator, "operation{s}Options", .{path[1..]});
+    var candidate: []const u8 = try self.optionsTypeBaseNameAlloc(operation, path);
     defer self.allocator.free(candidate);
     while (self.topLevelNameConflicts(candidate, document)) {
         const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{candidate});

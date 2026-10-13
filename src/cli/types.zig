@@ -19,6 +19,17 @@ pub const MultipleClientsMode = enum {
     }
 };
 
+/// How operation ids become Zig declaration names.
+pub const OperationNameMode = enum {
+    /// Keep an operation id that is already a valid identifier exactly as the
+    /// spec's author wrote it.
+    preserve,
+    /// Lowercase the first letter of every operation name, and capitalize the
+    /// first letter of every parameters struct type, so functions and types
+    /// follow Zig's naming conventions whatever case the spec used.
+    camel_case,
+};
+
 pub const FileKind = enum {
     models,
     runtime,
@@ -100,6 +111,10 @@ pub const CliArgs = struct {
     /// Wrap non-body method parameters in a single `options` struct instead of
     /// emitting them as individual function arguments.
     parameters_as_struct: bool = false,
+    /// Suffix of the type name of each operation's parameters struct, when
+    /// `parameters_as_struct` is set.
+    params_suffix: []const u8 = "Options",
+    operation_names: OperationNameMode = .preserve,
     /// Turn a schema's `enum` into a Zig enum rather than `[]const u8`. Off by
     /// default, because it changes the type of every field carrying one.
     generate_enums: bool = false,
