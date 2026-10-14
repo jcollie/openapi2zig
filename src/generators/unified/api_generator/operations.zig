@@ -34,8 +34,9 @@ pub fn generateOperations(self: *UnifiedApiGenerator, path: []const u8, path_ite
 }
 
 pub fn generateOperation(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation, document: UnifiedDocument) !void {
-    try self.generateComments(operation);
+    if (!self.args.doc_comments) try self.generateComments(operation);
     try self.generateOptionsType(operation, method, path, document);
+    try self.generateOperationDocComment(method, path, operation);
     try self.generateFunctionSignature(method, path, operation);
     try self.generateFunctionBody(method, path, operation);
     if (operation.operationId != null) {
@@ -61,6 +62,11 @@ pub fn generateFunctionResult(self: *UnifiedApiGenerator, method: []const u8, pa
     const raw_name = try std.fmt.allocPrint(self.allocator, "{s}Raw", .{operation_id});
     defer self.allocator.free(raw_name);
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// `");
+        try self.buffer.appendSlice(self.allocator, operation_id);
+        try self.buffer.appendSlice(self.allocator, "`, telling a successful response apart from an error\n/// response and from one that does not parse.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.appendIdentifier(result_name);
     try self.buffer.appendSlice(self.allocator, "(client: *Client");
@@ -84,6 +90,11 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
 
     const kind = bodyKindFor(operation);
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// `");
+        try self.buffer.appendSlice(self.allocator, operation_id);
+        try self.buffer.appendSlice(self.allocator, "`, handing back the response as it came -- its status,\n/// headers and body -- whatever the status is.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.appendIdentifier(raw_name);
     try self.buffer.appendSlice(self.allocator, "(client: *Client");
@@ -337,6 +348,35 @@ pub fn generateComments(self: *UnifiedApiGenerator, operation: Operation) !void 
         try self.appendLineComment(description);
         try self.buffer.appendSlice(self.allocator, "//\n");
     }
+}
+
+/// The operation's summary, its description, and the request it makes, as the
+/// doc comment of its function.
+pub fn generateOperationDocComment(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
+    if (!self.args.doc_comments) return;
+    var wrote = false;
+    if (operation.summary) |summary| {
+        try self.appendDocComment("", summary);
+        wrote = std.mem.trim(u8, summary, " \t\r\n").len != 0;
+    }
+    if (operation.description) |description| {
+        const same = if (operation.summary) |summary|
+            std.mem.eql(u8, std.mem.trim(u8, summary, " \t\r\n"), std.mem.trim(u8, description, " \t\r\n"))
+        else
+            false;
+        if (!same and std.mem.trim(u8, description, " \t\r\n").len != 0) {
+            if (wrote) try self.buffer.appendSlice(self.allocator, "///\n");
+            try self.appendDocComment("", description);
+            wrote = true;
+        }
+    }
+    if (wrote) try self.buffer.appendSlice(self.allocator, "///\n");
+    try self.buffer.appendSlice(self.allocator, "/// `");
+    try self.buffer.appendSlice(self.allocator, method);
+    try self.buffer.appendSlice(self.allocator, " ");
+    try self.buffer.appendSlice(self.allocator, path);
+    try self.buffer.appendSlice(self.allocator, "`\n");
+    if (operation.deprecated) try self.buffer.appendSlice(self.allocator, "///\n/// Deprecated.\n");
 }
 
 pub fn generateFunctionSignature(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {

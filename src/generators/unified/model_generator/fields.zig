@@ -157,6 +157,7 @@ pub fn appendRecursiveFieldType(self: *UnifiedModelGenerator, owner_name: []cons
 }
 
 pub fn generateStructField(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8, field_schema: Schema, is_required: bool) !void {
+    try self.appendDocComment("    ", field_schema.description);
     try self.buffer.appendSlice(self.allocator, "    ");
     try self.appendFieldIdentifier(field_name);
     try self.buffer.appendSlice(self.allocator, ": ");

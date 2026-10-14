@@ -9,6 +9,7 @@ const SchemaType = @import("../../models/common/document.zig").SchemaType;
 const Parameter = @import("../../models/common/document.zig").Parameter;
 const media_type = @import("../../media_type.zig");
 const ident = @import("ident_utils.zig");
+const doc_comment = @import("doc_comment.zig");
 const helpers = @import("api_generator/helpers.zig");
 
 const BodyKind = helpers.BodyKind;
@@ -261,6 +262,7 @@ pub const UnifiedApiGenerator = struct {
         };
         try self.generateHeader();
         try self.generateApiClient(document);
+        try self.generateOperationInfo(document);
         if (self.args.resource_wrappers != .none) {
             try self.generateResourceWrappers(document);
         }
@@ -283,6 +285,7 @@ pub const UnifiedApiGenerator = struct {
         self.auth_scheme = authSchemeFor(document);
         try self.generateHeaderMulti();
         try self.generateApiClient(document);
+        try self.generateOperationInfo(document);
         if (self.args.resource_wrappers != .none) {
             try self.generateResourceWrappers(document);
         }
@@ -325,6 +328,12 @@ pub const UnifiedApiGenerator = struct {
         defer self.allocator.free(safe_name);
         try self.buffer.appendSlice(self.allocator, safe_name);
         try self.buffer.appendSlice(self.allocator, "_param");
+    }
+
+    /// A doc comment, when doc comments were asked for and there is any text.
+    pub fn appendDocComment(self: *UnifiedApiGenerator, indent: []const u8, text: ?[]const u8) !void {
+        if (!self.args.doc_comments) return;
+        try doc_comment.append(&self.buffer, self.allocator, indent, text orelse return);
     }
 
     pub fn appendLineComment(self: *UnifiedApiGenerator, text: []const u8) !void {
@@ -385,6 +394,8 @@ pub const UnifiedApiGenerator = struct {
     pub const generateFunctionRaw = @import("api_generator/operations.zig").generateFunctionRaw;
     pub const generateStreamFunction = @import("api_generator/operations.zig").generateStreamFunction;
     pub const generateComments = @import("api_generator/operations.zig").generateComments;
+    pub const generateOperationInfo = @import("api_generator/operation_info.zig").generateOperationInfo;
+    pub const generateOperationDocComment = @import("api_generator/operations.zig").generateOperationDocComment;
     pub const generateFunctionSignature = @import("api_generator/operations.zig").generateFunctionSignature;
     pub const generateFunctionBody = @import("api_generator/operations.zig").generateFunctionBody;
     pub const generateFunctionBodyDirect = @import("api_generator/operations.zig").generateFunctionBodyDirect;

@@ -132,6 +132,15 @@ pub const CliArgs = struct {
     /// Turn a schema's `enum` into a Zig enum rather than `[]const u8`. Off by
     /// default, because it changes the type of every field carrying one.
     generate_enums: bool = false,
+    /// Carry the specification's summaries and descriptions into the output
+    /// as doc comments -- on each operation and its parameters, and on each
+    /// model and its fields -- rather than as plain comments, or not at all.
+    doc_comments: bool = false,
+    /// Declare `operation_info`, a namespace with one `OperationInfo` per
+    /// operation: its method and path, its summary, and each parameter's
+    /// location, description and allowed values, for a program that has to
+    /// know them at run time -- a command line built over the client, say.
+    operation_info: bool = false,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         if (self.owns_tags) allocator.free(self.tags);

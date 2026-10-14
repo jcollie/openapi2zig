@@ -69,6 +69,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var force = false;
     var runtime_only = false;
     var parameters_as_struct = false;
+    var doc_comments = false;
+    var operation_info = false;
     var params_suffix: ?[]const u8 = null;
     var operation_names: ?OperationNameMode = null;
     var name_overrides_list = std.ArrayList(OperationNameOverride).empty;
@@ -211,6 +213,10 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             runtime_only = true;
         } else if (std.mem.eql(u8, arg, "--parameters-as-struct")) {
             parameters_as_struct = true;
+        } else if (std.mem.eql(u8, arg, "--doc-comments")) {
+            doc_comments = true;
+        } else if (std.mem.eql(u8, arg, "--operation-info")) {
+            operation_info = true;
         } else if (std.mem.eql(u8, arg, "--params-suffix")) {
             i += 1;
             if (i >= args.len) {
@@ -311,6 +317,16 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
         if (parameters_as_struct) {
             printUsage();
             printError("--parameters-as-struct has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (doc_comments) {
+            printUsage();
+            printError("--doc-comments has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (operation_info) {
+            printUsage();
+            printError("--operation-info has no effect with --runtime-only\n", .{});
             return error.InvalidArguments;
         }
         if (params_suffix != null) {
@@ -490,6 +506,8 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .operation_name_overrides = name_overrides,
             .owns_operation_name_overrides = name_overrides_owned,
             .generate_enums = generate_enums,
+            .doc_comments = doc_comments,
+            .operation_info = operation_info,
         },
     };
 }

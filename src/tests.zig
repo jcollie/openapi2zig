@@ -22,6 +22,8 @@ const comment_sanitization_tests = @import("tests/comment_sanitization_tests.zig
 const parameter_reference_tests = @import("tests/parameter_reference_tests.zig");
 const response_reference_tests = @import("tests/response_reference_tests.zig");
 const array_parameter_tests = @import("tests/array_parameter_tests.zig");
+const doc_comment_tests = @import("tests/doc_comment_tests.zig");
+const doc_comment = @import("generators/unified/doc_comment.zig");
 const recursive_model_tests = @import("tests/recursive_model_tests.zig");
 const path_template_tests = @import("tests/path_template_tests.zig");
 const operation_id_naming_tests = @import("tests/operation_id_naming_tests.zig");
@@ -72,6 +74,8 @@ comptime {
     _ = parameter_reference_tests;
     _ = response_reference_tests;
     _ = array_parameter_tests;
+    _ = doc_comment_tests;
+    _ = doc_comment;
     _ = recursive_model_tests;
     _ = path_template_tests;
     _ = operation_id_naming_tests;

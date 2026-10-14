@@ -353,6 +353,7 @@ pub const SwaggerConverter = struct {
             .type = param_type,
             .format = format,
             .content_type = content_type,
+            .enum_values = parameter.enum_values orelse if (parameter.items) |items| items.enum_values else null,
         };
     }
 

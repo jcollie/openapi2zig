@@ -3,6 +3,7 @@ const UnifiedDocument = @import("../../models/common/document.zig").UnifiedDocum
 const Schema = @import("../../models/common/document.zig").Schema;
 const ident = @import("ident_utils.zig");
 const enum_registry = @import("enum_registry.zig");
+const doc_comment = @import("doc_comment.zig");
 
 pub fn isExtensibleRequest(name: []const u8) bool {
     return std.mem.eql(u8, name, "CreateResponse") or
@@ -15,6 +16,8 @@ pub const UnifiedModelGenerator = struct {
     source_schemas: ?*const std.StringHashMap(Schema) = null,
     /// Set by whoever drives the generator, from `--enums`.
     generate_enums: bool = false,
+    /// Write each schema's and each property's description as a doc comment.
+    doc_comments: bool = false,
     /// The document's enums as Zig types. See the note in `enum_registry` on
     /// why the API generator builds its own rather than borrowing this.
     enums: ?enum_registry.EnumRegistry = null,
@@ -68,6 +71,12 @@ pub const UnifiedModelGenerator = struct {
             .allocator = allocator,
             .buffer = std.ArrayList(u8).empty,
         };
+    }
+
+    /// A doc comment, when doc comments were asked for and there is any text.
+    pub fn appendDocComment(self: *UnifiedModelGenerator, indent: []const u8, text: ?[]const u8) !void {
+        if (!self.doc_comments) return;
+        try doc_comment.append(&self.buffer, self.allocator, indent, text orelse return);
     }
 
     pub fn deinit(self: *UnifiedModelGenerator) void {
@@ -159,6 +168,7 @@ pub const UnifiedModelGenerator = struct {
         if (schema.properties) |properties| {
             if (properties.count() > 0) {
                 try self.generateFieldHelpers(name, properties);
+                try self.appendDocComment("", schema.description orelse schema.title);
                 try self.buffer.appendSlice(self.allocator, "pub const ");
                 try self.appendIdentifier(name);
                 try self.buffer.appendSlice(self.allocator, " = struct {\n");

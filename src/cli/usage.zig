@@ -59,6 +59,9 @@ pub fn printUsage() void {
         \\                            Name the operation <id> <name>, exactly as given.
         \\                            Can be specified multiple times.
         \\   --enums                   Generate a Zig enum for each schema `enum`
+        \\   --doc-comments            Carry summaries and descriptions into doc comments
+        \\   --operation-info          Declare operation_info, describing each operation's
+        \\                            method, path and parameters for use at run time
         \\
         \\ EXAMPLES:
         \\   openapi2zig generate -i ./openapi/petstore.json -o api.zig

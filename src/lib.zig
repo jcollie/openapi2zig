@@ -250,6 +250,7 @@ pub fn generateModelsWithArgs(allocator: std.mem.Allocator, unified_doc: Unified
     var model_generator = UnifiedModelGenerator.init(allocator);
     defer model_generator.deinit();
     model_generator.generate_enums = args.generate_enums;
+    model_generator.doc_comments = args.doc_comments;
 
     return try model_generator.generate(unified_doc);
 }

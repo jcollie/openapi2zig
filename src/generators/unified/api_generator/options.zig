@@ -154,6 +154,11 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
         try self.options_type_names.put(key_copy_, candidate_copy_);
     }
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// The path, query and header values `");
+        try self.buffer.appendSlice(self.allocator, self.operationNameOf(operation) orelse path);
+        try self.buffer.appendSlice(self.allocator, "` is called with.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub const ");
     try self.appendOptionsTypeName(operation, method, path);
     try self.buffer.appendSlice(self.allocator, " = struct {\n");
@@ -162,6 +167,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
             if (param.location == .body) continue;
             const field_name = try self.optionsFieldNameAlloc(operation, method, path, i);
             defer self.allocator.free(field_name);
+            try self.appendDocComment("    ", param.description);
             try self.buffer.appendSlice(self.allocator, "    ");
             try self.appendFieldIdentifier(field_name);
             try self.buffer.appendSlice(self.allocator, ": ");
