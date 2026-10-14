@@ -351,6 +351,20 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    }
         \\    const status = response.head.status;
         \\
+        \\    // A 1xx, 204 or 304 response ends with its headers whatever they
+        \\    // say. `receiveHead` knows that, but `Response.reader`, and
+        \\    // `Request.deinit` draining what is left so the connection can be
+        \\    // reused, ask only whether the method can have a body: for a 204
+        \\    // with no `Content-Length` both read on, waiting for a close that a
+        \\    // kept-alive connection never sends. Such a response is not read,
+        \\    // and its connection is closed rather than drained.
+        \\    const has_body = request.method.responseHasBody() and status.class() != .informational and
+        \\        status != .no_content and status != .not_modified;
+        \\    if (!has_body) {
+        \\        if (req.connection) |connection| connection.closing = true;
+        \\        return .{ .status = status, .headers = headers, .header_storage = header_storage };
+        \\    }
+        \\
         \\    if (request.response_writer) |response_writer| {
         \\        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
         \\            .identity => &.{},

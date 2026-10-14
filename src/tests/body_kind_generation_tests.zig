@@ -207,6 +207,8 @@ test "binary body is sent verbatim through a direct fetch" {
     try expectContains(fixture.code, "const payload: ?[]const u8 = requestBody;");
     try expectContains(fixture.code, "\"application/octet-stream\", \"application/json\");");
     try expectContains(fixture.code, "const result = fetchResponse(client, .{");
+    // Without this a 204 with no Content-Length hangs the request.
+    try expectContains(fixture.code, "status != .no_content and status != .not_modified;");
     try expectContains(fixture.code, "if (obs.onRequest) |cb| cb(obs.ctx, std.http.Method.POST");
     try expectContains(fixture.code, "if (obs.onError) |cb| cb(obs.ctx, std.http.Method.POST");
     try expectContains(fixture.code, "if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.POST");
