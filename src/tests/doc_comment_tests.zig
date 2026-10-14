@@ -122,7 +122,7 @@ test "a parameter's description becomes its field's doc comment" {
     defer g.deinit(allocator);
 
     try expectContains(g.client,
-        \\/// The path, query and header values `issueListIssues` is called with.
+        \\/// The values `issueListIssues` is called with, all but its request body.
         \\pub const issueListIssuesParams = struct {
         \\    /// owner of the repo
         \\    owner: []const u8,

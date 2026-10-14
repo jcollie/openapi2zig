@@ -158,9 +158,9 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
     }
 
     if (self.args.doc_comments) {
-        try self.buffer.appendSlice(self.allocator, "/// The path, query and header values `");
+        try self.buffer.appendSlice(self.allocator, "/// The values `");
         try self.buffer.appendSlice(self.allocator, self.operationNameOf(operation) orelse path);
-        try self.buffer.appendSlice(self.allocator, "` is called with.\n");
+        try self.buffer.appendSlice(self.allocator, "` is called with, all but its request body.\n");
     }
     try self.buffer.appendSlice(self.allocator, "pub const ");
     try self.appendOptionsTypeName(operation, method, path);
