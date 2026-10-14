@@ -16,6 +16,7 @@ const Operation = @import("../../models/common/document.zig").Operation;
 const PathItem = @import("../../models/common/document.zig").PathItem;
 const mime = @import("../../media_type.zig");
 const SwaggerDocument = @import("../../models/v2.0/swagger.zig").SwaggerDocument;
+const Items2 = @import("../../models/v2.0/parameter.zig").Items;
 const Info2 = @import("../../models/v2.0/info.zig").Info;
 const Contact2 = @import("../../models/v2.0/info.zig").Contact;
 const License2 = @import("../../models/v2.0/info.zig").License;
@@ -327,7 +328,10 @@ pub const SwaggerConverter = struct {
         const schema = if (parameter.schema) |param_schema| blk: {
             const converted_schema = try self.convertSchema(param_schema);
             break :blk converted_schema;
-        } else null;
+        } else if (parameter.type == .array and parameter.items != null)
+            try self.convertParameterArray(parameter.items.?)
+        else
+            null;
         const param_type = if (parameter.type) |type_val| self.convertParameterType(type_val) else null;
         const format = parameter.format; // Reference, don't duplicate
         var content_type: ?[]const u8 = null;
@@ -375,6 +379,20 @@ pub const SwaggerConverter = struct {
             .body => .body,
             .formData => .form,
         };
+    }
+
+    /// A non-body parameter of `type: array` keeps its element type in
+    /// `items` rather than in a schema. Without one built from it, every such
+    /// parameter generated as a slice of JSON values, whose elements the
+    /// query writer then sent JSON-encoded -- `?state="open"`, quotes and all.
+    fn convertParameterArray(self: *SwaggerConverter, items: Items2) !Schema {
+        const element = try self.allocator.create(Schema);
+        errdefer self.allocator.destroy(element);
+        element.* = if (items.type == .array and items.items != null)
+            try self.convertParameterArray(items.items.?.*)
+        else
+            .{ .type = self.convertParameterType(items.type), .format = items.format };
+        return .{ .type = .array, .items = element };
     }
 
     fn convertParameterType(self: *SwaggerConverter, param_type: PrimitiveType2) SchemaType {
