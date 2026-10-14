@@ -209,6 +209,8 @@ test "binary body is sent verbatim through a direct fetch" {
     try expectContains(fixture.code, "const result = fetchResponse(client, .{");
     // Without this a 204 with no Content-Length hangs the request.
     try expectContains(fixture.code, "status != .no_content and status != .not_modified;");
+    // std.http asserts on a DELETE with a body; it goes out after the head.
+    try expectContains(fixture.code, "const unexpected_body = request.payload != null and !request.method.requestHasBody();");
     try expectContains(fixture.code, "if (obs.onRequest) |cb| cb(obs.ctx, std.http.Method.POST");
     try expectContains(fixture.code, "if (obs.onError) |cb| cb(obs.ctx, std.http.Method.POST");
     try expectContains(fixture.code, "if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.POST");

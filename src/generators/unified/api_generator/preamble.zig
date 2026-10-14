@@ -308,16 +308,46 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    const redirect_behavior: std.http.Client.Request.RedirectBehavior =
         \\        if (request.payload == null) .init(3) else .unhandled;
         \\
+        \\    // `std.http.Client` sends a body only with a method that it expects
+        \\    // to carry one, and asserts otherwise. HTTP allows one on any
+        \\    // method, and some APIs need it -- a DELETE that says what to
+        \\    // delete -- so such a body goes out after a head that declares its
+        \\    // length among the extra headers.
+        \\    const unexpected_body = request.payload != null and !request.method.requestHasBody();
+        \\    var length_text: [24]u8 = undefined;
+        \\    const extra_headers = if (unexpected_body) blk: {
+        \\        const with_length = try allocator.alloc(std.http.Header, request.extra_headers.len + 1);
+        \\        @memcpy(with_length[0..request.extra_headers.len], request.extra_headers);
+        \\        with_length[request.extra_headers.len] = .{
+        \\            .name = "content-length",
+        \\            .value = std.fmt.bufPrint(&length_text, "{d}", .{request.payload.?.len}) catch unreachable,
+        \\        };
+        \\        break :blk with_length;
+        \\    } else request.extra_headers;
+        \\    defer if (unexpected_body) allocator.free(extra_headers);
+        \\
         \\    var req = try client.http.request(request.method, request.location.uri, .{
         \\        .redirect_behavior = redirect_behavior,
-        \\        .extra_headers = request.extra_headers,
+        \\        .extra_headers = extra_headers,
         \\    });
         \\    defer req.deinit();
         \\
         \\    if (request.payload) |payload| {
-        \\        req.transfer_encoding = .{ .content_length = payload.len };
+        \\        if (unexpected_body) {
+        \\            try req.sendBodilessUnflushed();
+        \\            try req.connection.?.writer().writeAll(payload);
+        \\            try req.connection.?.flush();
+        \\        } else {
+        \\            req.transfer_encoding = .{ .content_length = payload.len };
+        \\            var body = try req.sendBodyUnflushed(&.{});
+        \\            try body.writer.writeAll(payload);
+        \\            try body.end();
+        \\            try req.connection.?.flush();
+        \\        }
+        \\    } else if (request.method.requestHasBody()) {
+        \\        // An empty body, still framed, as a POST or PUT has to be.
+        \\        req.transfer_encoding = .{ .content_length = 0 };
         \\        var body = try req.sendBodyUnflushed(&.{});
-        \\        try body.writer.writeAll(payload);
         \\        try body.end();
         \\        try req.connection.?.flush();
         \\    } else {
