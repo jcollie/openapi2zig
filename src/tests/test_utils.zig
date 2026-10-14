@@ -4,9 +4,9 @@ pub fn createTestAllocator() std.heap.DebugAllocator(.{}) {
     return std.heap.DebugAllocator(.{}){};
 }
 
-/// Wraps an allocator so that memory is never grown in place: every `resize`
-/// or `remap` that would make a block larger is refused, and the caller falls
-/// back to allocating a new block and copying.
+/// Wraps an allocator so that memory is never resized in place: every
+/// `resize` or `remap` that would change a block's size is refused, and the
+/// caller falls back to allocating a new block and copying.
 ///
 /// `std.testing.checkAllAllocationFailures` needs the number of allocations to
 /// be the same on every run. Whether a backing allocator can grow a block in
@@ -34,16 +34,20 @@ pub const NoGrowAllocator = struct {
         return self.backing.rawAlloc(len, alignment, ra);
     }
 
+    // Shrinking is refused too. Whether the backing allocator can shrink in
+    // place depends on where the memory happens to lie, and a refused shrink
+    // is answered with a fresh allocation, so passing shrinks through made
+    // the number of allocations differ from run to run once an output grew
+    // large enough -- which `checkAllAllocationFailures` reports as
+    // nondeterministic memory use.
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
-        const self: *NoGrowAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) return false;
-        return self.backing.rawResize(memory, alignment, new_len, ra);
+        _ = .{ ctx, alignment, ra };
+        return new_len == memory.len;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
-        const self: *NoGrowAllocator = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len) return null;
-        return self.backing.rawRemap(memory, alignment, new_len, ra);
+        _ = .{ ctx, alignment, ra };
+        return if (new_len == memory.len) memory.ptr else null;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
