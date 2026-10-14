@@ -356,7 +356,7 @@ pub fn topLevelNameConflicts(self: *UnifiedApiGenerator, name: []const u8, docum
         "Client",        "Owned",                     "RawResponse",        "ParseErrorResponse",  "ApiResult",        "HttpObserver",    "CancellationToken",
         "requestRaw",    "requestRawWithContentType", "getRaw",             "postJsonRaw",         "parseRawResponse", "getJsonResult",   "postJsonResult",
         "parseSseBytes", "parseSseReader",            "parseSseBytesTyped", "parseSseReaderTyped", "fetchResponse",    "FetchedResponse", "FetchRequest",
-        "findHeader",    "OperationInfo",             "operation_info",
+        "findHeader",    "OperationInfo",             "operation_info",     "FormFile",            "Multipart",
     };
     for (runtime_names) |runtime_name| {
         if (std.mem.eql(u8, name, runtime_name)) return true;

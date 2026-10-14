@@ -343,6 +343,12 @@ pub const SwaggerConverter = struct {
                     }
                 }
             }
+        } else if (location == .form) {
+            // A form field's media type is the form's: multipart when the
+            // operation takes it, or the parameter is a file, which only
+            // multipart can carry.
+            const multipart = parameter.type == .file or if (consumes) |list| hasMedia(list, "multipart/form-data") else false;
+            content_type = try self.allocator.dupe(u8, if (multipart) "multipart/form-data" else "application/x-www-form-urlencoded");
         }
         return Parameter{
             .name = name,
@@ -354,7 +360,15 @@ pub const SwaggerConverter = struct {
             .format = format,
             .content_type = content_type,
             .enum_values = parameter.enum_values orelse if (parameter.items) |items| items.enum_values else null,
+            .file = parameter.type == .file,
         };
+    }
+
+    fn hasMedia(list: []const []const u8, media: []const u8) bool {
+        for (list) |m| {
+            if (std.ascii.eqlIgnoreCase(mime.baseMediaType(m), media)) return true;
+        }
+        return false;
     }
 
     fn selectConsumesMedia(list: []const []const u8) ?[]const u8 {

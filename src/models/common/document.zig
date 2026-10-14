@@ -173,6 +173,9 @@ pub const Parameter = struct {
     /// declares them on itself (or on its `items`) rather than in a schema.
     /// Borrowed from the source document, so `deinit` never frees it.
     enum_values: ?[]const json.Value = null,
+    /// A Swagger 2.0 `formData` parameter of `type: file`: one part of a
+    /// `multipart/form-data` body, carrying a file rather than a value.
+    file: bool = false,
     pub fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
         if (self.schema) |*schema| schema.deinit(allocator);
         if (self.content_type) |ct| allocator.free(ct);

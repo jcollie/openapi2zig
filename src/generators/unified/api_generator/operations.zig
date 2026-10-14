@@ -11,6 +11,7 @@ const escapeZigString = helpers.escapeZigString;
 const bodyKindFor = helpers.bodyKindFor;
 const findBodyParam = helpers.findBodyParam;
 const hasHeaderParams = helpers.hasHeaderParams;
+const usesMultipart = helpers.usesMultipart;
 const authSchemeForOperation = helpers.authSchemeForOperation;
 const UnifiedApiGenerator = @import("../api_generator.zig").UnifiedApiGenerator;
 
@@ -109,6 +110,55 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     const scheme = authSchemeForOperation(document, operation);
     const needs_auth = scheme != null;
     const needs_headers = raw_has_header_params or needs_auth;
+
+    if (usesMultipart(operation)) {
+        // One part per form field that is set, sent with the boundary the
+        // body was built around.
+        try self.buffer.appendSlice(self.allocator, "\n    var multipart: Multipart = .{};\n");
+        try self.buffer.appendSlice(self.allocator, "    defer multipart.deinit(allocator);\n");
+        if (operation.parameters) |params| {
+            for (params, 0..) |param, i| {
+                if (param.location != .form) continue;
+                const escaped = try escapeZigString(self.allocator, param.name);
+                defer self.allocator.free(escaped);
+                if (param.required) {
+                    try self.buffer.appendSlice(self.allocator, "    try multipart.add(allocator, \"");
+                    try self.buffer.appendSlice(self.allocator, escaped);
+                    try self.buffer.appendSlice(self.allocator, "\", ");
+                    try self.appendParamReference(operation, method, path, i, param);
+                    try self.buffer.appendSlice(self.allocator, ");\n");
+                } else {
+                    try self.buffer.appendSlice(self.allocator, "    if (");
+                    try self.appendParamReference(operation, method, path, i, param);
+                    try self.buffer.appendSlice(self.allocator, ") |value| try multipart.add(allocator, \"");
+                    try self.buffer.appendSlice(self.allocator, escaped);
+                    try self.buffer.appendSlice(self.allocator, "\", value);\n");
+                }
+            }
+        }
+        try self.buffer.appendSlice(self.allocator, "    const form = try multipart.finish(allocator, client.io);\n");
+        try self.buffer.appendSlice(self.allocator, "    defer form.deinit(allocator);\n");
+        try self.buffer.appendSlice(self.allocator, "    const payload: ?[]const u8 = form.body;\n");
+        if (needs_headers) {
+            try self.buffer.appendSlice(self.allocator, "\n");
+            try self.appendHeaderLocals(header_local_names);
+            try self.appendAuthHeader(scheme, header_local_names);
+            if (raw_has_header_params) {
+                try self.appendHeaderParamAppends(operation, method, path, header_local_names);
+            }
+            try self.buffer.appendSlice(self.allocator, "\n    return requestRawWithContentTypeAndExtraHeaders(client, std.http.Method.");
+            try self.buffer.appendSlice(self.allocator, method);
+            try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), payload, form.content_type, ");
+            try self.buffer.appendSlice(self.allocator, header_local_names.headers);
+            try self.buffer.appendSlice(self.allocator, ".items);\n");
+        } else {
+            try self.buffer.appendSlice(self.allocator, "\n    return requestRawWithContentType(client, std.http.Method.");
+            try self.buffer.appendSlice(self.allocator, method);
+            try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), payload, form.content_type);\n");
+        }
+        try self.buffer.appendSlice(self.allocator, "}\n\n");
+        return;
+    }
 
     switch (kind) {
         .json => {

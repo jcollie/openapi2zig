@@ -4,6 +4,7 @@ const Operation = @import("../../../models/common/document.zig").Operation;
 const Parameter = @import("../../../models/common/document.zig").Parameter;
 const helpers = @import("helpers.zig");
 const classifyBody = helpers.classifyBody;
+const usesMultipart = helpers.usesMultipart;
 const UnifiedApiGenerator = @import("../api_generator.zig").UnifiedApiGenerator;
 
 pub fn appendFlatCallArguments(self: *UnifiedApiGenerator, operation: Operation) !void {
@@ -38,6 +39,8 @@ pub fn appendParamBaseType(self: *UnifiedApiGenerator, param: Parameter) !void {
         } else {
             try self.buffer.appendSlice(self.allocator, "std.json.Value");
         }
+    } else if (param.file) {
+        try self.buffer.appendSlice(self.allocator, "FormFile");
     } else {
         if (param.schema) |schema| {
             try self.appendZigQueryTypeFromSchema(schema);
@@ -290,15 +293,17 @@ pub fn appendFlatOperationParameters(self: *UnifiedApiGenerator, operation: Oper
             const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
             try self.appendFlatParamIdentifier(name);
             try self.buffer.appendSlice(self.allocator, ": ");
-            if ((param.location == .query or param.location == .header) and !param.required) try self.buffer.appendSlice(self.allocator, "?");
+            if ((param.location == .query or param.location == .header or param.location == .form) and !param.required) try self.buffer.appendSlice(self.allocator, "?");
             try self.appendParamBaseType(param);
         }
     }
 }
 
 pub fn appendUnusedParameters(self: *UnifiedApiGenerator, operation: Operation, method: []const u8, path: []const u8) !void {
+    const multipart = usesMultipart(operation);
     if (operation.parameters) |parameters| {
         for (parameters, 0..) |parameter, i| {
+            if (parameter.location == .form and multipart) continue;
             if (parameter.location != .path and parameter.location != .body and parameter.location != .query and parameter.location != .header) {
                 try self.buffer.appendSlice(self.allocator, "    _ = ");
                 try self.appendParamReference(operation, method, path, i, parameter);
