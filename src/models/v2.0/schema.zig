@@ -1,5 +1,6 @@
 const std = @import("std");
 const json = std.json;
+const json_helpers = @import("../json_helpers.zig");
 const ExternalDocumentation = @import("externaldocs.zig").ExternalDocumentation;
 
 pub const Xml = struct {
@@ -115,6 +116,7 @@ pub const Schema = struct {
             allocator.free(allOf);
         }
         if (self.enum_values) |enum_vals| {
+            for (enum_vals) |value| json_helpers.deinitScalar(allocator, value);
             allocator.free(enum_vals);
         }
         if (self.discriminator) |discriminator| {
@@ -231,10 +233,15 @@ pub const Schema = struct {
         return array_list.toOwnedSlice(allocator);
     }
     fn parseJsonValueArray(allocator: std.mem.Allocator, value: json.Value) anyerror![]json.Value {
+        // The parse tree is freed once the document is read, so each value
+        // is copied out of it rather than borrowed.
         var array_list = std.ArrayList(json.Value).empty;
-        errdefer array_list.deinit(allocator);
+        errdefer {
+            for (array_list.items) |item| json_helpers.deinitScalar(allocator, item);
+            array_list.deinit(allocator);
+        }
         for (value.array.items) |item| {
-            try array_list.append(allocator, item);
+            try array_list.append(allocator, try json_helpers.cloneScalar(allocator, item));
         }
         return array_list.toOwnedSlice(allocator);
     }
