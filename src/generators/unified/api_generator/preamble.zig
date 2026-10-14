@@ -37,10 +37,20 @@ pub fn generateRuntimePreamble(self: *UnifiedApiGenerator) !void {
         \\        allocator: std.mem.Allocator,
         \\        body: []u8,
         \\        parsed: std.json.Parsed(T),
+        \\        /// The response's headers, in the order they were received.
+        \\        headers: []const std.http.Header = &.{},
+        \\        header_storage: []u8 = &.{},
         \\
         \\        pub fn deinit(self: *@This()) void {
         \\            self.parsed.deinit();
         \\            self.allocator.free(self.body);
+        \\            self.allocator.free(self.headers);
+        \\            self.allocator.free(self.header_storage);
+        \\        }
+        \\
+        \\        /// The first header called `name`, compared without regard to case.
+        \\        pub fn header(self: *const @This(), name: []const u8) ?[]const u8 {
+        \\            return findHeader(self.headers, name);
         \\        }
         \\
         \\        pub fn value(self: *@This()) *T {
@@ -53,11 +63,28 @@ pub fn generateRuntimePreamble(self: *UnifiedApiGenerator) !void {
         \\    allocator: std.mem.Allocator,
         \\    status: std.http.Status,
         \\    body: []u8,
+        \\    /// The response's headers, in the order they were received.
+        \\    headers: []const std.http.Header = &.{},
+        \\    header_storage: []u8 = &.{},
         \\
         \\    pub fn deinit(self: *@This()) void {
         \\        self.allocator.free(self.body);
+        \\        self.allocator.free(self.headers);
+        \\        self.allocator.free(self.header_storage);
+        \\    }
+        \\
+        \\    /// The first header called `name`, compared without regard to case.
+        \\    pub fn header(self: *const @This(), name: []const u8) ?[]const u8 {
+        \\        return findHeader(self.headers, name);
         \\    }
         \\};
+        \\
+        \\pub fn findHeader(headers: []const std.http.Header, name: []const u8) ?[]const u8 {
+        \\    for (headers) |h| {
+        \\        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        \\    }
+        \\    return null;
+        \\}
         \\
         \\pub const ParseErrorResponse = struct {
         \\    raw: RawResponse,
@@ -249,6 +276,106 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    try headers.append(allocator, .{ .name = name, .value = value });
         \\}
         \\
+        \\/// What `fetchResponse` hands back: the status, and the headers copied out
+        \\/// of the connection's buffer, which `deinit` frees.
+        \\pub const FetchedResponse = struct {
+        \\    status: std.http.Status,
+        \\    headers: []std.http.Header,
+        \\    header_storage: []u8,
+        \\
+        \\    pub fn deinit(self: FetchedResponse, allocator: std.mem.Allocator) void {
+        \\        allocator.free(self.headers);
+        \\        allocator.free(self.header_storage);
+        \\    }
+        \\};
+        \\
+        \\/// What `fetchResponse` sends: the subset of `std.http.Client.fetch`'s
+        \\/// arguments the generated operations use.
+        \\pub const FetchRequest = struct {
+        \\    location: union(enum) { uri: std.Uri },
+        \\    method: std.http.Method,
+        \\    extra_headers: []const std.http.Header = &.{},
+        \\    payload: ?[]const u8 = null,
+        \\    response_writer: ?*std.Io.Writer = null,
+        \\};
+        \\
+        \\/// `std.http.Client.fetch`, keeping the response's headers. They live in
+        \\/// the connection's buffer only until the body is read, so they are
+        \\/// copied out before it is. Redirects are followed as `fetch` follows
+        \\/// them: up to three, and none for a request with a body.
+        \\pub fn fetchResponse(client: *Client, request: FetchRequest) !FetchedResponse {
+        \\    const allocator = client.allocator;
+        \\    const redirect_behavior: std.http.Client.Request.RedirectBehavior =
+        \\        if (request.payload == null) .init(3) else .unhandled;
+        \\
+        \\    var req = try client.http.request(request.method, request.location.uri, .{
+        \\        .redirect_behavior = redirect_behavior,
+        \\        .extra_headers = request.extra_headers,
+        \\    });
+        \\    defer req.deinit();
+        \\
+        \\    if (request.payload) |payload| {
+        \\        req.transfer_encoding = .{ .content_length = payload.len };
+        \\        var body = try req.sendBodyUnflushed(&.{});
+        \\        try body.writer.writeAll(payload);
+        \\        try body.end();
+        \\        try req.connection.?.flush();
+        \\    } else {
+        \\        try req.sendBodiless();
+        \\    }
+        \\
+        \\    var redirect_buffer: [8 * 1024]u8 = undefined;
+        \\    var response = try req.receiveHead(if (redirect_behavior == .unhandled) &.{} else &redirect_buffer);
+        \\
+        \\    var count: usize = 0;
+        \\    var size: usize = 0;
+        \\    var it = response.head.iterateHeaders();
+        \\    while (it.next()) |h| {
+        \\        count += 1;
+        \\        size += h.name.len + h.value.len;
+        \\    }
+        \\    const headers = try allocator.alloc(std.http.Header, count);
+        \\    errdefer allocator.free(headers);
+        \\    const header_storage = try allocator.alloc(u8, size);
+        \\    errdefer allocator.free(header_storage);
+        \\    var offset: usize = 0;
+        \\    it = response.head.iterateHeaders();
+        \\    for (headers) |*h| {
+        \\        const next = it.next().?;
+        \\        @memcpy(header_storage[offset..][0..next.name.len], next.name);
+        \\        h.name = header_storage[offset..][0..next.name.len];
+        \\        offset += next.name.len;
+        \\        @memcpy(header_storage[offset..][0..next.value.len], next.value);
+        \\        h.value = header_storage[offset..][0..next.value.len];
+        \\        offset += next.value.len;
+        \\    }
+        \\    const status = response.head.status;
+        \\
+        \\    if (request.response_writer) |response_writer| {
+        \\        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        \\            .identity => &.{},
+        \\            .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        \\            .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        \\            .compress => return error.UnsupportedCompressionMethod,
+        \\        };
+        \\        defer allocator.free(decompress_buffer);
+        \\        var transfer_buffer: [64]u8 = undefined;
+        \\        var decompress: std.http.Decompress = undefined;
+        \\        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        \\        _ = reader.streamRemaining(response_writer) catch |err| switch (err) {
+        \\            error.ReadFailed => return response.bodyErr().?,
+        \\            else => |e| return e,
+        \\        };
+        \\    } else {
+        \\        const reader = response.reader(&.{});
+        \\        _ = reader.discardRemaining() catch |err| switch (err) {
+        \\            error.ReadFailed => return response.bodyErr().?,
+        \\        };
+        \\    }
+        \\
+        \\    return .{ .status = status, .headers = headers, .header_storage = header_storage };
+        \\}
+        \\
         \\pub fn requestRaw(client: *Client, method: std.http.Method, url: []const u8, payload: ?[]const u8) !RawResponse {
         \\    return requestRawWithContentType(client, method, url, payload, "application/json");
         \\}
@@ -274,7 +401,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    defer response_body.deinit();
         \\
         \\    const start = std.Io.Clock.awake.now(client.io);
-        \\    const result = client.http.fetch(.{
+        \\    const result = fetchResponse(client, .{
         \\        .location = .{ .uri = uri },
         \\        .method = method,
         \\        .extra_headers = headers.items,
@@ -288,16 +415,19 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    };
         \\    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));
         \\
+        \\    errdefer result.deinit(allocator);
         \\    const body = try response_body.toOwnedSlice();
         \\
         \\    if (client.http_observer) |obs| {
-        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, &.{}, body, elapsed_ns);
+        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, result.headers, body, elapsed_ns);
         \\    }
         \\
         \\    return .{
         \\        .allocator = allocator,
         \\        .status = result.status,
         \\        .body = body,
+        \\        .headers = result.headers,
+        \\        .header_storage = result.header_storage,
         \\    };
         \\}
         \\
@@ -317,7 +447,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    defer response_body.deinit();
         \\
         \\    const start = std.Io.Clock.awake.now(client.io);
-        \\    const result = client.http.fetch(.{
+        \\    const result = fetchResponse(client, .{
         \\        .location = .{ .uri = uri },
         \\        .method = method,
         \\        .extra_headers = headers.items,
@@ -331,16 +461,19 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    };
         \\    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));
         \\
+        \\    errdefer result.deinit(allocator);
         \\    const body = try response_body.toOwnedSlice();
         \\
         \\    if (client.http_observer) |obs| {
-        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, &.{}, body, elapsed_ns);
+        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, result.headers, body, elapsed_ns);
         \\    }
         \\
         \\    return .{
         \\        .allocator = allocator,
         \\        .status = result.status,
         \\        .body = body,
+        \\        .headers = result.headers,
+        \\        .header_storage = result.header_storage,
         \\    };
         \\}
         \\
@@ -366,7 +499,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    const parsed = std.json.parseFromSlice(T, raw.allocator, raw.body, .{ .ignore_unknown_fields = true }) catch |err| {
         \\        return .{ .parse_error = .{ .raw = raw, .error_name = @errorName(err) } };
         \\    };
-        \\    return .{ .ok = .{ .allocator = raw.allocator, .body = raw.body, .parsed = parsed } };
+        \\    return .{ .ok = .{ .allocator = raw.allocator, .body = raw.body, .parsed = parsed, .headers = raw.headers, .header_storage = raw.header_storage } };
         \\}
         \\
         \\pub fn getJsonResult(comptime T: type, client: *Client, path: []const u8) !ApiResult(T) {

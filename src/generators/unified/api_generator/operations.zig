@@ -223,7 +223,7 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     try self.buffer.appendSlice(self.allocator, "    var response_body: std.Io.Writer.Allocating = .init(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "    defer response_body.deinit();\n");
     try self.buffer.appendSlice(self.allocator, "    const start = std.Io.Clock.awake.now(client.io);\n");
-    try self.buffer.appendSlice(self.allocator, "    const result = client.http.fetch(.{\n");
+    try self.buffer.appendSlice(self.allocator, "    const result = fetchResponse(client, .{\n");
     try self.buffer.appendSlice(self.allocator, "        .location = .{ .uri = uri },\n");
     try self.buffer.appendSlice(self.allocator, "        .method = std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
@@ -242,16 +242,19 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     try self.buffer.appendSlice(self.allocator, "        return err;\n");
     try self.buffer.appendSlice(self.allocator, "    };\n");
     try self.buffer.appendSlice(self.allocator, "    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));\n");
+    try self.buffer.appendSlice(self.allocator, "    errdefer result.deinit(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "\n    const body = try response_body.toOwnedSlice();\n");
     try self.buffer.appendSlice(self.allocator, "\n    if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, body, elapsed_ns);\n");
+    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, body, elapsed_ns);\n");
     try self.buffer.appendSlice(self.allocator, "    }\n");
     try self.buffer.appendSlice(self.allocator, "\n    return .{\n");
     try self.buffer.appendSlice(self.allocator, "        .allocator = allocator,\n");
     try self.buffer.appendSlice(self.allocator, "        .status = result.status,\n");
     try self.buffer.appendSlice(self.allocator, "        .body = body,\n");
+    try self.buffer.appendSlice(self.allocator, "        .headers = result.headers,\n");
+    try self.buffer.appendSlice(self.allocator, "        .header_storage = result.header_storage,\n");
     try self.buffer.appendSlice(self.allocator, "    };\n");
     try self.buffer.appendSlice(self.allocator, "}\n\n");
 }
@@ -606,7 +609,7 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     try self.buffer.appendSlice(self.allocator, "    }\n");
 
     try self.buffer.appendSlice(self.allocator, "    const start = std.Io.Clock.awake.now(client.io);\n");
-    try self.buffer.appendSlice(self.allocator, "    const result = client.http.fetch(.{\n");
+    try self.buffer.appendSlice(self.allocator, "    const result = fetchResponse(client, .{\n");
     try self.buffer.appendSlice(self.allocator, "        .location = .{ .uri = uri },\n");
     try self.buffer.appendSlice(self.allocator, "        .method = std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
@@ -633,13 +636,15 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     try self.buffer.appendSlice(self.allocator, "        if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "            if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, \"\", elapsed_ns);\n");
+    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, \"\", elapsed_ns);\n");
     try self.buffer.appendSlice(self.allocator, "        }\n");
+    try self.buffer.appendSlice(self.allocator, "        result.deinit(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "        return error.ResponseError;\n");
     try self.buffer.appendSlice(self.allocator, "    }\n");
 
     if (has_return_value) {
         try self.buffer.appendSlice(self.allocator, "\n");
+        try self.buffer.appendSlice(self.allocator, "    errdefer result.deinit(allocator);\n");
         try self.buffer.appendSlice(self.allocator, "    const body = try response_body.toOwnedSlice();\n");
         try self.buffer.appendSlice(self.allocator, "    errdefer allocator.free(body);\n");
         try self.buffer.appendSlice(self.allocator, "    const parsed = try std.json.parseFromSlice(");
@@ -648,14 +653,15 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
         try self.buffer.appendSlice(self.allocator, "    if (client.http_observer) |obs| {\n");
         try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
         try self.buffer.appendSlice(self.allocator, method);
-        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, body, elapsed_ns);\n");
+        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, body, elapsed_ns);\n");
         try self.buffer.appendSlice(self.allocator, "    }\n");
-        try self.buffer.appendSlice(self.allocator, "    return .{ .allocator = allocator, .body = body, .parsed = parsed };\n");
+        try self.buffer.appendSlice(self.allocator, "    return .{ .allocator = allocator, .body = body, .parsed = parsed, .headers = result.headers, .header_storage = result.header_storage };\n");
     } else {
+        try self.buffer.appendSlice(self.allocator, "    defer result.deinit(allocator);\n");
         try self.buffer.appendSlice(self.allocator, "    if (client.http_observer) |obs| {\n");
         try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
         try self.buffer.appendSlice(self.allocator, method);
-        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, \"\", elapsed_ns);\n");
+        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, \"\", elapsed_ns);\n");
         try self.buffer.appendSlice(self.allocator, "    }\n");
     }
 
