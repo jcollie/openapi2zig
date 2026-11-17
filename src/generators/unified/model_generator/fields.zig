@@ -1,7 +1,6 @@
 const std = @import("std");
 const UnifiedDocument = @import("../../../models/common/document.zig").UnifiedDocument;
 const Schema = @import("../../../models/common/document.zig").Schema;
-const ident = @import("../ident_utils.zig");
 const model_generator = @import("../model_generator.zig");
 const UnifiedModelGenerator = model_generator.UnifiedModelGenerator;
 const isExtensibleRequest = model_generator.isExtensibleRequest;
@@ -13,6 +12,7 @@ const isNullableSchema = unions.isNullableSchema;
 const isNullSchema = unions.isNullSchema;
 
 pub fn arrayChildSchema(schema: Schema) ?Schema {
+    if (unions.requiresLosslessComposition(schema)) return null;
     if (schema.type == .array or schema.items != null) {
         if (schema.items) |items| return items.*;
         return null;
@@ -22,7 +22,7 @@ pub fn arrayChildSchema(schema: Schema) ?Schema {
 }
 
 pub fn canGenerateNamedArrayItemType(self: *UnifiedModelGenerator, schema: Schema) !bool {
-    if (schema.ref != null) return false;
+    if (schema.ref != null or schema.additional_properties == true or unions.requiresLosslessComposition(schema)) return false;
     if (unionVariants(schema)) |variants| {
         if (schema.discriminator_property) |discriminator_property| {
             return try self.discriminatorVariantsAreSafe(variants, discriminator_property);
@@ -34,7 +34,7 @@ pub fn canGenerateNamedArrayItemType(self: *UnifiedModelGenerator, schema: Schem
 }
 
 pub fn canGenerateNamedFieldType(self: *UnifiedModelGenerator, schema: Schema) !bool {
-    if (schema.ref != null) return false;
+    if (schema.ref != null or schema.additional_properties == true or unions.requiresLosslessComposition(schema)) return false;
     if (arrayChildSchema(schema) != null) return try self.canGenerateNamedArrayItemType(arrayChildSchema(schema).?);
     if (unionVariants(schema)) |variants| {
         var non_null_count: usize = 0;
@@ -105,58 +105,10 @@ pub fn generateStructFields(self: *UnifiedModelGenerator, owner_name: []const u8
     }
 }
 
-/// The definition a field refers to by value, if it refers to one at all.
-/// An array field is a slice and holds its element out of line, so it is not a
-/// value reference and cannot make a struct contain itself.
-fn valueReferenceOf(schema: Schema) ?[]const u8 {
-    if (arrayChildSchema(schema) != null) return null;
-    if (schema.ref) |ref| return refName(ref);
-    if (nonNullUnionChild(schema)) |child| return valueReferenceOf(child);
-    return null;
-}
-
-/// Whether a field of type `start` would make `owner_name` contain itself.
-/// A struct cannot hold itself by value, directly (Forgejo's `Repository` has
-/// a `parent` that is another `Repository`) or around a longer loop, so such a
-/// field has to be generated behind a pointer instead.
-pub fn referenceIsRecursive(self: *UnifiedModelGenerator, owner_name: []const u8, start: []const u8) !bool {
-    const schemas = self.source_schemas orelse return false;
-
-    var visited = std.StringHashMap(void).init(self.allocator);
-    defer visited.deinit();
-    var pending = std.ArrayList([]const u8).empty;
-    defer pending.deinit(self.allocator);
-
-    try pending.append(self.allocator, start);
-    while (pending.pop()) |name| {
-        if (std.mem.eql(u8, name, owner_name)) return true;
-        const entry = try visited.getOrPut(name);
-        if (entry.found_existing) continue;
-
-        const schema = schemas.get(name) orelse continue;
-        const properties = schema.properties orelse continue;
-        var property_iterator = properties.valueIterator();
-        while (property_iterator.next()) |property| {
-            if (valueReferenceOf(property.*)) |next| try pending.append(self.allocator, next);
-        }
-    }
-    return false;
-}
-
-/// Emit a self-referential field as a pointer, and report whether it did.
-/// Only the indirection is added: `std.json` allocates through a single-item
-/// pointer when parsing, so the field is read back the same way any other is.
-pub fn appendRecursiveFieldType(self: *UnifiedModelGenerator, owner_name: []const u8, field_schema: Schema) !bool {
-    const reference = valueReferenceOf(field_schema) orelse return false;
-    if (!try self.referenceIsRecursive(owner_name, reference)) return false;
-
-    if (isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
-    try self.buffer.appendSlice(self.allocator, "*const ");
-    try self.appendIdentifier(reference);
-    return true;
-}
-
 pub fn generateStructField(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8, field_schema: Schema, is_required: bool) !void {
+    try self.appendDocComment("    ", field_schema.description);
+    self.pointer_next_ref = self.isPointerField(owner_name, field_name);
+    defer self.pointer_next_ref = false;
     try self.buffer.appendSlice(self.allocator, "    ");
     try self.appendFieldIdentifier(field_name);
     try self.buffer.appendSlice(self.allocator, ": ");
@@ -175,19 +127,47 @@ pub fn generateStructField(self: *UnifiedModelGenerator, owner_name: []const u8,
         if (is_required and isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
         if (!is_required and isNullableSchema(field_schema)) try self.buffer.appendSlice(self.allocator, "?");
         try self.buffer.appendSlice(self.allocator, "[]const u8");
-    } else if (!try self.appendRecursiveFieldType(owner_name, field_schema)) {
-        if (!try self.appendNamedArrayTypeForField(owner_name, field_name, field_schema)) {
-            if (!try self.appendNamedFieldTypeForField(owner_name, field_name, field_schema)) {
-                try self.appendZigType(field_schema);
-            }
+    } else if (!try self.appendNamedArrayTypeForField(owner_name, field_name, field_schema)) {
+        if (!try self.appendNamedFieldTypeForField(owner_name, field_name, field_schema)) {
+            try self.appendZigType(field_schema);
         }
     }
 
     if (!is_required) {
         try self.buffer.appendSlice(self.allocator, " = null");
+    } else if (requiredStringDefault(field_schema)) |default_value| {
+        // A required property that declares a default still parses when the
+        // server omits it (OData's `@odata.type` is the usual case).
+        try self.buffer.appendSlice(self.allocator, " = \"");
+        for (default_value) |c| switch (c) {
+            '"' => try self.buffer.appendSlice(self.allocator, "\\\""),
+            '\\' => try self.buffer.appendSlice(self.allocator, "\\\\"),
+            '\n' => try self.buffer.appendSlice(self.allocator, "\\n"),
+            '\r' => try self.buffer.appendSlice(self.allocator, "\\r"),
+            '\t' => try self.buffer.appendSlice(self.allocator, "\\t"),
+            0...8, 11, 12, 14...31, 127 => {
+                const digits = "0123456789abcdef";
+                try self.buffer.appendSlice(self.allocator, "\\x");
+                try self.buffer.append(self.allocator, digits[c >> 4]);
+                try self.buffer.append(self.allocator, digits[c & 0xf]);
+            },
+            else => try self.buffer.append(self.allocator, c),
+        };
+        try self.buffer.append(self.allocator, '"');
     }
 
     try self.buffer.appendSlice(self.allocator, ",\n");
+}
+
+/// The string default of a plain, non-nullable string property, if any.
+fn requiredStringDefault(schema: Schema) ?[]const u8 {
+    if (schema.type != .string or schema.nullable or schema.ref != null) return null;
+    if (schema.enum_values != null) return null;
+    const default = schema.default orelse return null;
+    return switch (default) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 pub fn generateJsonStringify(self: *UnifiedModelGenerator, properties: std.StringHashMap(Schema), required: ?[][]const u8) !void {
@@ -249,6 +229,10 @@ pub fn appendZigType(self: *UnifiedModelGenerator, schema: Schema) !void {
         }
     }
 
+    if (unions.requiresLosslessComposition(schema)) {
+        try self.buffer.appendSlice(self.allocator, "std.json.Value");
+        return;
+    }
     if (schema.discriminator_property == null and self.isStringLikeSchema(schema)) {
         if (isNullableSchema(schema)) try self.buffer.appendSlice(self.allocator, "?");
         try self.buffer.appendSlice(self.allocator, "[]const u8");
@@ -278,8 +262,12 @@ pub fn appendZigType(self: *UnifiedModelGenerator, schema: Schema) !void {
 
     if (schema.ref) |ref| {
         if (isNullableSchema(schema)) try self.buffer.appendSlice(self.allocator, "?");
+        if (self.pointer_next_ref) {
+            self.pointer_next_ref = false;
+            try self.buffer.appendSlice(self.allocator, "*const ");
+        }
         if (std.mem.lastIndexOf(u8, ref, "/")) |last_slash| {
-            try self.appendIdentifier(ref[last_slash + 1 ..]);
+            try self.appendIdentifier(self.typeName(ref[last_slash + 1 ..]));
             return;
         }
         try self.buffer.appendSlice(self.allocator, "[]const u8");
@@ -327,9 +315,13 @@ pub fn appendZigType(self: *UnifiedModelGenerator, schema: Schema) !void {
 }
 
 pub fn appendArrayItemType(self: *UnifiedModelGenerator, schema: Schema) !void {
+    if (unions.requiresLosslessComposition(schema)) {
+        try self.buffer.appendSlice(self.allocator, "std.json.Value");
+        return;
+    }
     if (schema.ref) |ref| {
         if (std.mem.lastIndexOf(u8, ref, "/")) |last_slash| {
-            try self.appendIdentifier(ref[last_slash + 1 ..]);
+            try self.appendIdentifier(self.typeName(ref[last_slash + 1 ..]));
             return;
         }
     }

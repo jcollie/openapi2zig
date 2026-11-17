@@ -74,6 +74,22 @@ pub fn findBodyParam(operation: Operation) ?Parameter {
     return null;
 }
 
+/// Whether the operation's form fields go out as a `multipart/form-data` body:
+/// it has some, one of them a file or all of a multipart form, and no body
+/// parameter besides.
+pub fn usesMultipart(operation: Operation) bool {
+    if (findBodyParam(operation) != null) return false;
+    const params = operation.parameters orelse return false;
+    for (params) |p| {
+        if (p.location != .form) continue;
+        if (p.file) return true;
+        if (p.content_type) |ct| {
+            if (startsWithIgnoreCase(ct, "multipart/")) return true;
+        }
+    }
+    return false;
+}
+
 pub fn bodyKindFor(operation: Operation) BodyKind {
     const param = findBodyParam(operation) orelse return .none;
     return classifyBody(param.content_type);

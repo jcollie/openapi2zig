@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const run_integration_tests = b.option(bool, "run-integration", "Run network integration tests") orelse false;
     const build_info = createBuildInfoOptions(b, run_integration_tests);
-    const package_snapshot_step = createPackageSnapshotStep(b);
+    const package_snapshot = addPackageSnapshot(b);
     const yaml_dep = b.dependency("yaml", .{
         .target = target,
         .optimize = optimize,
@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_root_module,
     });
     exe.root_module.addImport("openapi2zig", openapi2zig_mod);
+    b.addNamedLazyPath("openapi2zig-cli", exe.getEmittedBin());
     b.installArtifact(exe);
 
     // Static library for linking
@@ -56,7 +57,8 @@ pub fn build(b: *std.Build) void {
     const supported_targets = [_][]const u8{
         "x86_64-linux",
         "aarch64-linux",
-        "x86_64-windows",
+        "x86_64-windows-gnu",
+        "aarch64-windows-gnu",
         "x86_64-macos",
         "aarch64-macos",
     };
@@ -105,16 +107,14 @@ pub fn build(b: *std.Build) void {
         build_all_step.dependOn(&install_cross_exe.step);
     }
 
-    addInstallStep(b, target, build_info, yaml_dep, "install-release", "Build ReleaseSmall and install to $HOME/.local/bin", .ReleaseSmall);
-    addInstallStep(b, target, build_info, yaml_dep, "install-release-safe", "Build ReleaseSafe and install to $HOME/.local/bin", .ReleaseSafe);
-    addInstallStep(b, target, build_info, yaml_dep, "install-release-fast", "Build ReleaseFast and install to $HOME/.local/bin", .ReleaseFast);
-    addInstallStep(b, target, build_info, yaml_dep, "install-debug", "Build Debug and install to $HOME/.local/bin", .Debug);
+    addInstallStep(b, target, build_info, "install-release", "Build ReleaseSmall and install to $HOME/.local/bin", .small);
+    addInstallStep(b, target, build_info, "install-release-safe", "Build ReleaseSafe and install to $HOME/.local/bin", .safe);
+    addInstallStep(b, target, build_info, "install-release-fast", "Build ReleaseFast and install to $HOME/.local/bin", .fast);
+    addInstallStep(b, target, build_info, "install-debug", "Build Debug and install to $HOME/.local/bin", .debug);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -326,7 +326,7 @@ pub fn build(b: *std.Build) void {
         "http://localhost:1234",
     });
     const run_generate_lmstudio_json_step = b.step("run-generate-lmstudio", "Run the app with generate command for LM Studio OpenAPI JSON");
-    run_generate_lmstudio_json_step.dependOn(&run_generate_v3_yaml_cmd.step);
+    run_generate_lmstudio_json_step.dependOn(&run_generate_lmstudio_json_cmd.step);
 
     const run_generate_lmstudio_multi_cmd = b.addRunArtifact(exe);
     run_generate_lmstudio_multi_cmd.addArgs(&.{
@@ -360,7 +360,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_generate_anthropic_json_step = b.step("run-generate-anthropic", "Run the app with generate command for Anthropic OpenAPI JSON");
-    run_generate_anthropic_json_step.dependOn(&run_generate_lmstudio_json_cmd.step);
+    run_generate_anthropic_json_step.dependOn(&run_generate_anthropic_json_cmd.step);
 
     const run_generate_openai_json_cmd = b.addRunArtifact(exe);
     run_generate_openai_json_cmd.addArgs(&.{
@@ -472,6 +472,147 @@ pub fn build(b: *std.Build) void {
     const run_generated_tests = b.addRunArtifact(generated_tests);
     test_step.dependOn(&run_generated_tests.step);
 
+    // Exercise both flat arguments and optional-parameter structs over HTTP.
+    for ([_]bool{ false, true }) |options_mode| {
+        const provider_fixture = b.addRunArtifact(exe);
+        provider_fixture.addArg("generate");
+        if (options_mode) provider_fixture.addArg("--parameters-as-struct");
+        provider_fixture.addArg("-i");
+        provider_fixture.addFileArg(b.path("openapi/v3.1/regression-provider-schemas.json"));
+        provider_fixture.addArg("-o");
+        const provider_models = provider_fixture.addOutputFileArg(if (options_mode) "provider_options.zig" else "provider_models.zig");
+        const provider_tests_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_provider_schema_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        provider_tests_module.addImport("provider_fixture", b.createModule(.{
+            .root_source_file = provider_models,
+            .target = target,
+            .optimize = optimize,
+        }));
+        const provider_tests = b.addTest(.{ .root_module = provider_tests_module });
+        test_step.dependOn(&b.addRunArtifact(provider_tests).step);
+    }
+
+    const composition_fixture = b.addRunArtifact(exe);
+    composition_fixture.addArgs(&.{ "generate", "-i" });
+    composition_fixture.addFileArg(b.path("openapi/v3.1/regression-streaming-composition.json"));
+    composition_fixture.addArg("-o");
+    const composition_source = composition_fixture.addOutputFileArg("compositions.zig");
+    const composition_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/compile_streaming_composition_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    composition_module.addImport("composition_fixture", b.createModule(.{
+        .root_source_file = composition_source,
+        .target = target,
+        .optimize = optimize,
+    }));
+    const composition_tests = b.addTest(.{ .root_module = composition_module });
+    const composition_test_step = b.step("test-streaming-composition", "Compile and round-trip generated mixed composition models");
+    composition_test_step.dependOn(&b.addRunArtifact(composition_tests).step);
+    test_step.dependOn(composition_test_step);
+
+    const collision_test_step = b.step("test-parameter-collisions", "Compile and exercise collision-safe parameters over loopback HTTP");
+    test_step.dependOn(collision_test_step);
+    for ([_]bool{ false, true }) |options_mode| {
+        for ([_]?[]const u8{ null, "PerTag", "PerEndpoint" }) |clients_mode| {
+            const collision_fixture = b.addRunArtifact(exe);
+            collision_fixture.addArg("generate");
+            if (options_mode) collision_fixture.addArg("--parameters-as-struct");
+            if (clients_mode) |mode| {
+                collision_fixture.addArgs(&.{ "--resource-wrappers", "none", "--multiple-clients", mode });
+            } else {
+                collision_fixture.addArgs(&.{ "--resource-wrappers", "paths" });
+            }
+            collision_fixture.addArg("-i");
+            collision_fixture.addFileArg(b.path("openapi/v3.1/regression-parameter-collisions.json"));
+            collision_fixture.addArg("-o");
+            const collision_source = collision_fixture.addOutputFileArg("collisions.zig");
+            const collision_module = b.createModule(.{
+                .root_source_file = b.path("src/tests/compile_parameter_collision_fixture.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            collision_module.addImport("collision_fixture", b.createModule(.{
+                .root_source_file = collision_source,
+                .target = target,
+                .optimize = optimize,
+            }));
+            const collision_tests = b.addTest(.{ .root_module = collision_module });
+            collision_test_step.dependOn(&b.addRunArtifact(collision_tests).step);
+        }
+    }
+
+    // OData-derived descriptions (Microsoft Graph and friends) use shapes the
+    // petstore samples never do: path-level parameters, response references,
+    // wildcard status codes, dotted names and OData path segments. Generate
+    // from a reduction of them in every client style and compile the result.
+    const odata_test_step = b.step("test-odata-shapes", "Compile code generated from an OData-shaped description");
+    test_step.dependOn(odata_test_step);
+    const odata_variants = [_][]const []const u8{
+        &.{ "--resource-wrappers", "none" },
+        &.{ "--resource-wrappers", "paths" },
+        &.{ "--resource-wrappers", "tags" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerTag" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerEndpoint" },
+        &.{ "--resource-wrappers", "paths", "--parameters-as-struct" },
+        &.{ "--resource-wrappers", "paths", "--model-naming", "namespaced", "--string-enums" },
+        &.{ "--resource-wrappers", "paths", "--pagination", "--typed-errors" },
+        &.{ "--resource-wrappers", "none", "--pagination", "--typed-errors", "--model-naming", "namespaced", "--parameters-as-struct" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerTag", "--model-naming", "namespaced", "--parameters-as-struct" },
+    };
+    for (odata_variants) |variant| {
+        const odata_fixture = b.addRunArtifact(exe);
+        odata_fixture.addArg("generate");
+        odata_fixture.addArgs(variant);
+        odata_fixture.addArg("-i");
+        odata_fixture.addFileArg(b.path("openapi/v3.0/regression-odata-shapes.json"));
+        odata_fixture.addArg("-o");
+        const odata_source = odata_fixture.addOutputFileArg("odata.zig");
+        const odata_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_odata_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        odata_module.addImport("odata_fixture", b.createModule(.{
+            .root_source_file = odata_source,
+            .target = target,
+            .optimize = optimize,
+        }));
+        const odata_tests = b.addTest(.{ .root_module = odata_module });
+        odata_test_step.dependOn(&b.addRunArtifact(odata_tests).step);
+    }
+
+    // The same description with the operations split into one file per tag.
+    const odata_split_variants = [_][]const []const u8{
+        &.{ "--resource-wrappers", "none", "--parameters-as-struct", "--model-naming", "namespaced", "--pagination", "--typed-errors", "--string-enums" },
+        &.{ "--resource-wrappers", "paths" },
+    };
+    for (odata_split_variants) |variant| {
+        const split_fixture = b.addRunArtifact(exe);
+        split_fixture.addArgs(&.{ "generate", "--multiple-files", "--split-by-tag" });
+        split_fixture.addArgs(variant);
+        split_fixture.addArg("-i");
+        split_fixture.addFileArg(b.path("openapi/v3.0/regression-odata-shapes.json"));
+        split_fixture.addArg("-o");
+        const split_dir = split_fixture.addOutputDirectoryArg("odata_split");
+        const split_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_odata_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        split_module.addImport("odata_fixture", b.createModule(.{
+            .root_source_file = split_dir.path(b, "client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }));
+        const split_tests = b.addTest(.{ .root_module = split_module });
+        odata_test_step.dependOn(&b.addRunArtifact(split_tests).step);
+    }
+
     const multi_generated_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("generated/compile_multi_generated.zig"),
@@ -483,11 +624,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_multi_generated_tests.step);
 
     const test_package_cmd = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
-    test_package_cmd.step.dependOn(package_snapshot_step);
-    test_package_cmd.setCwd(b.path(".zig-cache/package-snapshot/examples/package_consumer"));
+    test_package_cmd.setCwd(package_snapshot.path(b, "examples/package_consumer"));
     const test_package_step = b.step("test-package", "Build downstream package consumer example");
     test_package_step.dependOn(&test_package_cmd.step);
     test_step.dependOn(&test_package_cmd.step);
+
+    // Generate a complete SDK repository from the petstore spec, then build it
+    // the way a consumer would: unit tests, every operation, and the examples.
+    const sdk_fixture_dir = ".zig-cache/sdk-fixture";
+    const sdk_generate = b.addRunArtifact(exe);
+    sdk_generate.addArgs(&.{ "generate", "--sdk", "--sdk-name", "petstore", "--force", "-i", "openapi/v3.0/petstore.json", "-o", sdk_fixture_dir });
+    var sdk_previous: *std.Build.Step = &sdk_generate.step;
+    for ([_][]const u8{ "test", "check", "examples" }) |sdk_step_name| {
+        const sdk_build = b.addSystemCommand(&.{ b.graph.zig_exe, "build", sdk_step_name });
+        sdk_build.setCwd(b.path(sdk_fixture_dir));
+        sdk_build.step.dependOn(sdk_previous);
+        sdk_previous = &sdk_build.step;
+    }
+    const test_sdk_step = b.step("test-sdk", "Generate a petstore SDK repository and build it");
+    test_sdk_step.dependOn(sdk_previous);
+    test_step.dependOn(sdk_previous);
 
     const test_artifact = b.addInstallArtifact(
         exe_unit_tests,
@@ -504,12 +660,17 @@ fn createBuildInfoOptions(b: *std.Build, run_integration_tests: bool) *std.Build
     // its own directory as the working directory, so read the version and the
     // git metadata from the package root rather than from wherever the build
     // was started; otherwise generated headers claim the consumer's version.
-    const build_root = b.build_root.path orelse ".";
+    const build_root = buildRootPath(b);
     const package_version = getPackageVersion(b, io) orelse "unknown";
     // Only ask git when the package root is a checkout of its own. A fetched
     // package is unpacked inside the dependent's project, where git would
     // happily describe *that* repository instead of this one.
     const git_checkout = isGitCheckout(b, build_root);
+    // The build configuration is cached, and nothing tells the cache that a
+    // commit or a new tag changes what git reports. Poisoning it makes `zig
+    // build` configure afresh every time in a checkout; a fetched package asks
+    // git nothing and stays cacheable.
+    if (git_checkout) b.graph.poisonCache();
     const git_tag = (if (git_checkout)
         getGitOutput(b.allocator, io, &.{ "git", "-C", build_root, "describe", "--tags", "--abbrev=0" })
     else
@@ -536,45 +697,33 @@ fn createBuildInfoOptions(b: *std.Build, run_integration_tests: bool) *std.Build
     return options;
 }
 
-fn createPackageSnapshotStep(b: *std.Build) *std.Build.Step {
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "prepare-package-snapshot",
-        .owner = b,
-        .makeFn = makePackageSnapshot,
-    });
-    return step;
+/// Copies the package's files into a directory of their own, so that the
+/// package consumer example builds against the package as a dependent sees it.
+/// The file list comes from git at make time, so the step always runs.
+fn addPackageSnapshot(b: *std.Build) std.Build.LazyPath {
+    const snapshot = b.addRunArtifact(addHostTool(b, "package_snapshot", "tools/package_snapshot.zig"));
+    snapshot.setName("prepare-package-snapshot");
+    snapshot.setCwd(b.path("."));
+    snapshot.has_side_effects = true;
+    return snapshot.addOutputDirectoryArg("package-snapshot");
 }
 
-fn makePackageSnapshot(step: *std.Build.Step, options: std.Build.Step.MakeOptions) !void {
-    _ = options;
-    const b = step.owner;
-    const allocator = b.allocator;
-    const io = b.graph.io;
-    const cwd = std.Io.Dir.cwd();
-    const snapshot_root = ".zig-cache/package-snapshot";
+/// Builds one of the programs in `tools/` for the machine running the build.
+fn addHostTool(b: *std.Build, name: []const u8, root_source_file: []const u8) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(root_source_file),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+}
 
-    try cwd.deleteTree(io, snapshot_root);
-    try cwd.createDirPath(io, snapshot_root);
-
-    const repo_files = getPackageSnapshotFiles(allocator, io) orelse return error.UnableToPreparePackageSnapshot;
-    defer allocator.free(repo_files);
-
-    var lines = std.mem.tokenizeScalar(u8, repo_files, '\n');
-    while (lines.next()) |line| {
-        const repo_path = std.mem.trimEnd(u8, line, "\r");
-        if (repo_path.len == 0) continue;
-
-        const destination_path = try std.fs.path.join(allocator, &.{ snapshot_root, repo_path });
-        defer allocator.free(destination_path);
-
-        if (std.fs.path.dirname(destination_path)) |dest_dir| {
-            try cwd.createDirPath(io, dest_dir);
-        }
-
-        try cwd.copyFile(repo_path, cwd, destination_path, io, .{});
-    }
+/// The package root as a path git can be pointed at.
+fn buildRootPath(b: *std.Build) []const u8 {
+    const root = b.root.toString(b.allocator) catch @panic("OOM");
+    return if (root.len == 0) "." else root;
 }
 
 /// True when `dir` holds a `.git` of its own: a directory in a normal clone,
@@ -588,7 +737,8 @@ fn isGitCheckout(b: *std.Build, dir: []const u8) bool {
 
 fn getPackageVersion(b: *std.Build, io: std.Io) ?[]const u8 {
     const allocator = b.allocator;
-    const path = b.pathFromRoot("build.zig.zon");
+    b.dependOnFileContents(b.path("build.zig.zon"));
+    const path = b.root.joinString(allocator, "build.zig.zon") catch @panic("OOM");
     const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024)) catch return null;
     const marker = ".version = \"";
     const start = std.mem.indexOf(u8, content, marker) orelse return null;
@@ -597,39 +747,26 @@ fn getPackageVersion(b: *std.Build, io: std.Io) ?[]const u8 {
     return content[version_start..version_end];
 }
 
-fn getPackageSnapshotFiles(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
-    return getGitOutput(allocator, io, &.{
-        "git",
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "--",
-        "build.zig",
-        "build.zig.zon",
-        "src",
-        "resources",
-        "openapi",
-        "generated",
-        "vendor/zig-yaml",
-        "LICENSE",
-        "README.md",
-        "examples/package_consumer",
-    });
-}
-
 fn addInstallStep(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     build_info: *std.Build.Step.Options,
-    yaml_dep: *std.Build.Dependency,
     step_name: []const u8,
     description: []const u8,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
+    const yaml_dep = b.dependency("yaml", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const exe = addOpenApi2ZigExecutable(b, "openapi2zig", target, optimize, build_info, yaml_dep);
     const install_step = b.step(step_name, description);
-    const install = InstallReleaseStep.create(b, @tagName(optimize), exe.getEmittedBin(), getInstallPrefix(b), exe.out_filename);
+    const install = b.addRunArtifact(addHostTool(b, "install_release", "tools/install_release.zig"));
+    install.setName(b.fmt("install {s} ({t})", .{ exe.out_filename, optimize }));
+    install.addArtifactArg2(exe, .{ .make_absolute = true });
+    install.addDirectoryArg2(b.graph.path(.install_prefix, ""), .{ .make_absolute = true });
+    install.addFileArg2(b.path("build.zig"), .{ .make_absolute = true });
+    install.has_side_effects = true;
     install_step.dependOn(&install.step);
 }
 
@@ -637,7 +774,7 @@ fn addOpenApi2ZigExecutable(
     b: *std.Build,
     name: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     build_info: *std.Build.Step.Options,
     yaml_dep: *std.Build.Dependency,
 ) *std.Build.Step.Compile {
@@ -673,65 +810,6 @@ fn addOpenApi2ZigExecutable(
 fn addApplicationIcon(b: *std.Build, module: *std.Build.Module) void {
     module.addWin32ResourceFile(.{ .file = b.path("resources/openapi2zig.rc") });
 }
-
-fn getInstallPrefix(b: *std.Build) []const u8 {
-    const default_prefix = b.build_root.join(b.allocator, &.{"zig-out"}) catch @panic("OOM");
-    if (!std.mem.eql(u8, b.install_prefix, default_prefix)) {
-        return b.install_prefix;
-    }
-
-    if (b.graph.environ_map.get("INSTALL_DIR")) |install_dir| {
-        if (install_dir.len > 0) return install_dir;
-    }
-
-    if (b.graph.environ_map.get("HOME")) |home| {
-        if (home.len > 0) return b.pathJoin(&.{ home, ".local", "bin" });
-    }
-    if (b.graph.environ_map.get("USERPROFILE")) |home| {
-        if (home.len > 0) return b.pathJoin(&.{ home, ".local", "bin" });
-    }
-
-    @panic("unable to determine install directory: set HOME, USERPROFILE, or INSTALL_DIR");
-}
-
-const InstallReleaseStep = struct {
-    step: std.Build.Step,
-    source: std.Build.LazyPath,
-    dest_dir: []const u8,
-    dest_name: []const u8,
-
-    fn create(
-        b: *std.Build,
-        label: []const u8,
-        source: std.Build.LazyPath,
-        dest_dir: []const u8,
-        dest_name: []const u8,
-    ) *InstallReleaseStep {
-        const self = b.allocator.create(InstallReleaseStep) catch @panic("OOM");
-        self.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = b.fmt("install {s} ({s}) to {s}", .{ dest_name, label, dest_dir }),
-                .owner = b,
-                .makeFn = make,
-            }),
-            .source = source.dupe(b),
-            .dest_dir = b.dupePath(dest_dir),
-            .dest_name = b.dupePath(dest_name),
-        };
-        source.addStepDependencies(&self.step);
-        return self;
-    }
-
-    fn make(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
-        _ = options;
-        const b = step.owner;
-        const self: *InstallReleaseStep = @fieldParentPtr("step", step);
-        const dest_path = b.pathResolve(&.{ self.dest_dir, self.dest_name });
-        const p = try step.installFile(self.source, dest_path);
-        step.result_cached = p == .fresh;
-    }
-};
 
 fn getGitOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) ?[]const u8 {
     const result = std.process.run(allocator, io, .{

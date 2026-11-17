@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_names = @import("../generators/unified/model_names.zig");
 
 pub const ResourceWrapperMode = enum {
     none,
@@ -17,6 +18,24 @@ pub const MultipleClientsMode = enum {
             .per_endpoint => "PerEndpoint",
         };
     }
+};
+
+/// How operation ids become Zig declaration names.
+pub const OperationNameMode = enum {
+    /// Keep an operation id that is already a valid identifier exactly as the
+    /// spec's author wrote it.
+    preserve,
+    /// Lowercase the first letter of every operation name, and capitalize the
+    /// first letter of every parameters struct type, so functions and types
+    /// follow Zig's naming conventions whatever case the spec used.
+    camel_case,
+};
+
+/// The declaration name to give one operation in place of the one derived
+/// from its operation id.
+pub const OperationNameOverride = struct {
+    operation_id: []const u8,
+    name: []const u8,
 };
 
 pub const FileKind = enum {
@@ -100,14 +119,54 @@ pub const CliArgs = struct {
     /// Wrap non-body method parameters in a single `options` struct instead of
     /// emitting them as individual function arguments.
     parameters_as_struct: bool = false,
+    /// Suffix of the type name of each operation's parameters struct, when
+    /// `parameters_as_struct` is set.
+    params_suffix: []const u8 = "Options",
+    operation_names: OperationNameMode = .preserve,
+    /// Names to use for particular operations, by operation id, exactly as
+    /// given: `operation_names` does not apply to them. For resolving a
+    /// collision without the underscore suffix it would otherwise get.
+    /// The slice is freed by `deinit(allocator)` when
+    /// `owns_operation_name_overrides` is true.
+    operation_name_overrides: []const OperationNameOverride = &.{},
+    owns_operation_name_overrides: bool = false,
     /// Turn a schema's `enum` into a Zig enum rather than `[]const u8`. Off by
     /// default, because it changes the type of every field carrying one.
     generate_enums: bool = false,
+    /// Carry the specification's summaries and descriptions into the output
+    /// as doc comments -- on each operation and its parameters, and on each
+    /// model and its fields -- rather than as plain comments, or not at all.
+    doc_comments: bool = false,
+    /// Declare `operation_info`, a namespace with one `OperationInfo` per
+    /// operation: its method and path, its summary, and each parameter's
+    /// location, description and allowed values, for a program that has to
+    /// know them at run time -- a command line built over the client, say.
+    operation_info: bool = false,
+    /// How component schema names become Zig type names.
+    model_naming: model_names.Mode = .raw,
+    /// Emit a `Pager` and `...Pages` functions for operations marked `x-ms-pageable`.
+    pagination: bool = false,
+    /// Declare named string enums as Zig enums.
+    string_enums: bool = false,
+    /// Emit `ApiError` and `parseApiError` for the API's common error model.
+    typed_errors: bool = false,
+    /// Put the operations of each tag in their own file (`client/<tag>.zig`).
+    split_by_tag: bool = false,
+    /// Generate a complete SDK repository (sources plus build files, docs,
+    /// CI workflows and examples) instead of bare Zig sources.
+    sdk: bool = false,
+    /// Path to the SDK config file. Defaults to `<output>/openapi2zig.json`.
+    sdk_config_path: ?[]const u8 = null,
+    /// SDK package name, used when no config file exists yet.
+    sdk_name: ?[]const u8 = null,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         if (self.owns_tags) allocator.free(self.tags);
         self.tags = &.{};
         self.owns_tags = false;
+        if (self.owns_operation_name_overrides) allocator.free(self.operation_name_overrides);
+        self.operation_name_overrides = &.{};
+        self.owns_operation_name_overrides = false;
     }
 };
 

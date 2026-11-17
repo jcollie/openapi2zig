@@ -6,7 +6,17 @@ const model_generator = @import("../model_generator.zig");
 const UnifiedModelGenerator = model_generator.UnifiedModelGenerator;
 const isExtensibleRequest = model_generator.isExtensibleRequest;
 
+/// A union is only one constraint in these intersections. Emitting its
+/// variants alone loses base fields (or the other union's fields).
+pub fn requiresLosslessComposition(schema: Schema) bool {
+    if (schema.one_of != null and schema.any_of != null) return true;
+    if (schema.one_of == null and schema.any_of == null) return false;
+    if (schema.properties) |properties| return properties.count() > 0;
+    return false;
+}
+
 pub fn unionVariants(schema: Schema) ?[]Schema {
+    if (requiresLosslessComposition(schema)) return null;
     if (schema.one_of) |variants| return variants;
     if (schema.any_of) |variants| return variants;
     return null;
@@ -30,7 +40,10 @@ pub fn nonNullUnionChild(schema: Schema) ?Schema {
 pub fn isStringLikeSchema(self: *UnifiedModelGenerator, schema: Schema) bool {
     if (schema.ref) |ref| {
         const schemas = self.source_schemas orelse return false;
-        return self.isStringLikeSchema(schemas.get(refName(ref)) orelse return false);
+        const target = schemas.get(refName(ref)) orelse return false;
+        // A named enum that is declared as a Zig enum is a type of its own.
+        if (self.string_enums and @import("enums.zig").enumMembers(target) != null) return false;
+        return self.isStringLikeSchema(target);
     }
     if (schema.type == .string) return true;
     if (unionVariants(schema)) |variants| {
@@ -85,8 +98,12 @@ pub fn refName(ref: []const u8) []const u8 {
 }
 
 pub fn variantTypeNameAlloc(self: *UnifiedModelGenerator, union_name: []const u8, variant: Schema, index: usize) ![]const u8 {
-    if (variant.ref) |ref| return try self.allocator.dupe(u8, refName(ref));
-    return try std.fmt.allocPrint(self.allocator, "{s}Variant{d}", .{ union_name, index });
+    if (variant.ref) |ref| return try self.allocator.dupe(u8, self.typeName(refName(ref)));
+    const suggested = try std.fmt.allocPrint(self.allocator, "{s}Variant{d}", .{ union_name, index });
+    defer self.allocator.free(suggested);
+    const detail = try std.fmt.allocPrint(self.allocator, "{d}", .{index});
+    defer self.allocator.free(detail);
+    return self.helperNameAlloc(union_name, .variant, detail, suggested);
 }
 
 pub fn appendTitleIdentPart(self: *UnifiedModelGenerator, out: *std.ArrayList(u8), value: []const u8) !void {
@@ -104,7 +121,7 @@ pub fn appendTitleIdentPart(self: *UnifiedModelGenerator, out: *std.ArrayList(u8
     }
 }
 
-pub fn fieldTypeNameAlloc(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8) ![]const u8 {
+fn suggestedFieldTypeNameAlloc(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8) ![]const u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(self.allocator);
     try self.appendTitleIdentPart(&out, owner_name);
@@ -113,10 +130,18 @@ pub fn fieldTypeNameAlloc(self: *UnifiedModelGenerator, owner_name: []const u8, 
     return try out.toOwnedSlice(self.allocator);
 }
 
+pub fn fieldTypeNameAlloc(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8) ![]const u8 {
+    const suggested = try suggestedFieldTypeNameAlloc(self, owner_name, field_name);
+    defer self.allocator.free(suggested);
+    return self.helperNameAlloc(owner_name, .field, field_name, suggested);
+}
+
 pub fn arrayFieldItemTypeNameAlloc(self: *UnifiedModelGenerator, owner_name: []const u8, field_name: []const u8) ![]const u8 {
-    const field_type_name = try self.fieldTypeNameAlloc(owner_name, field_name);
+    const field_type_name = try suggestedFieldTypeNameAlloc(self, owner_name, field_name);
     defer self.allocator.free(field_type_name);
-    return try std.fmt.allocPrint(self.allocator, "{s}Item", .{field_type_name});
+    const suggested = try std.fmt.allocPrint(self.allocator, "{s}Item", .{field_type_name});
+    defer self.allocator.free(suggested);
+    return self.helperNameAlloc(owner_name, .array_field_item, field_name, suggested);
 }
 
 pub fn discriminatorVariantsAreSafe(self: *UnifiedModelGenerator, variants: []Schema, discriminator_property: []const u8) !bool {
@@ -149,14 +174,14 @@ pub fn generateInlineVariantTypes(self: *UnifiedModelGenerator, union_name: []co
         if (variant.type == .array) {
             if (variant.items) |item_schema| {
                 if (try self.canGenerateNamedArrayItemType(item_schema.*)) {
-                    const item_type_name = try std.fmt.allocPrint(self.allocator, "{s}Item", .{type_name});
+                    const item_type_name = try self.arrayItemTypeNameAlloc(type_name);
                     defer self.allocator.free(item_type_name);
                     try self.generateSchema(item_type_name, item_schema.*);
                 }
             }
         }
         if (variant.properties) |properties| {
-            if (properties.count() > 0) {
+            if (properties.count() > 0 and variant.additional_properties != true and !requiresLosslessComposition(variant)) {
                 try self.generateFieldHelpers(type_name, properties);
                 try self.buffer.appendSlice(self.allocator, "pub const ");
                 try self.appendIdentifier(type_name);
@@ -270,7 +295,7 @@ pub fn variantFieldNameAlloc(self: *UnifiedModelGenerator, variant: Schema, inde
     if (self.schemaVariantTag(variant, "type")) |tag| return try self.sanitizeIdentifierAlloc(tag);
     if (variant.ref) |ref| return try self.sanitizeIdentifierAlloc(refName(ref));
     if (variant.title) |title| {
-        if (std.ascii.indexOfIgnoreCase(title, "text") != null and variant.type == .string) return try self.allocator.dupe(u8, "text");
+        if (std.ascii.findIgnoreCase(title, "text") != null and variant.type == .string) return try self.allocator.dupe(u8, "text");
         return try self.sanitizeIdentifierAlloc(title);
     }
     if (variant.type) |schema_type| {
@@ -353,7 +378,7 @@ pub fn appendStructuralVariantType(self: *UnifiedModelGenerator, union_name: []c
             if (try self.canGenerateNamedArrayItemType(item_schema.*)) {
                 const type_name = try self.variantTypeNameAlloc(union_name, variant, index);
                 defer self.allocator.free(type_name);
-                const item_type_name = try std.fmt.allocPrint(self.allocator, "{s}Item", .{type_name});
+                const item_type_name = try self.arrayItemTypeNameAlloc(type_name);
                 defer self.allocator.free(item_type_name);
                 try self.buffer.appendSlice(self.allocator, "[]const ");
                 try self.appendIdentifier(item_type_name);

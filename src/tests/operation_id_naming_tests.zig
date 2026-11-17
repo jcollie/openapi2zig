@@ -179,6 +179,31 @@ test "operation ids that camel case to the same name stay distinct" {
     try testing.expect(std.mem.indexOf(u8, code, "pub fn getPet_(client: *Client) ") != null);
 }
 
+test "an operation can be named readResponseBody" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const spec =
+        \\{
+        \\  "openapi": "3.0.0",
+        \\  "info": { "title": "Naming", "version": "1.0.0" },
+        \\  "paths": {
+        \\    "/body": {
+        \\      "get": {
+        \\        "operationId": "readResponseBody",
+        \\        "responses": { "200": { "description": "ok" } }
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    const code = try generateClient(allocator, spec, .{ .input_path = "fixture.json" });
+    defer allocator.free(code);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "fn readResponseBody("));
+}
+
 test "operation names avoid the Raw and Result variants of other operations" {
     var gpa = test_utils.createTestAllocator();
     const allocator = gpa.allocator();
@@ -224,4 +249,140 @@ test "streaming events delegation routes through the alias when shadowed" {
     // events delegation has to go through the file-scope alias.
     try testing.expect(std.mem.indexOf(u8, code, "const _fooStreamingEvents = fooStreamingEvents;") != null);
     try testing.expect(std.mem.indexOf(u8, code, "return _fooStreamingEvents(Event, self.client") != null);
+}
+
+// Forgejo names an operation "ActionRun", the same as one of its schemas, and
+// writes some of its other operation ids in PascalCase.
+const spec_with_pascal_case_operation_ids =
+    \\{
+    \\  "openapi": "3.0.0",
+    \\  "info": { "title": "Naming", "version": "1.0.0" },
+    \\  "paths": {
+    \\    "/runs/{run_id}": {
+    \\      "get": {
+    \\        "operationId": "ActionRun",
+    \\        "parameters": [
+    \\          { "name": "run_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+    \\        ],
+    \\        "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ActionRun" } } } } }
+    \\      }
+    \\    },
+    \\    "/runs": {
+    \\      "get": {
+    \\        "operationId": "ListActionRuns",
+    \\        "parameters": [
+    \\          { "name": "page", "in": "query", "schema": { "type": "integer" } }
+    \\        ],
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    },
+    \\    "/pets/{petId}": {
+    \\      "get": {
+    \\        "operationId": "getPet",
+    \\        "parameters": [
+    \\          { "name": "petId", "in": "path", "required": true, "schema": { "type": "integer" } }
+    \\        ],
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    }
+    \\  },
+    \\  "components": {
+    \\    "schemas": {
+    \\      "ActionRun": { "type": "object", "properties": { "id": { "type": "integer" } } }
+    \\    }
+    \\  }
+    \\}
+;
+
+test "preserved operation names keep the spec's case and suffix a schema collision" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const code = try generateClient(allocator, spec_with_pascal_case_operation_ids, .{
+        .input_path = "fixture.json",
+        .parameters_as_struct = true,
+    });
+    defer allocator.free(code);
+
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn ActionRun_(client: *Client, options: ActionRun_Options) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn ListActionRuns(client: *Client, options: ListActionRunsOptions) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn getPet(client: *Client, options: getPetOptions) ") != null);
+}
+
+test "camel-case operation names lowercase functions and capitalize parameter types" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const code = try generateClient(allocator, spec_with_pascal_case_operation_ids, .{
+        .input_path = "fixture.json",
+        .parameters_as_struct = true,
+        .params_suffix = "Params",
+        .operation_names = .camel_case,
+    });
+    defer allocator.free(code);
+
+    // Lowercasing parts the operation from the schema, so neither is suffixed.
+    try testing.expect(std.mem.indexOf(u8, code, "pub const ActionRunParams = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn actionRun(client: *Client, options: ActionRunParams) !Owned(ActionRun) {") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn actionRunRaw(client: *Client, options: ActionRunParams) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn actionRunResult(client: *Client, options: ActionRunParams) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "ActionRun_") == null);
+
+    try testing.expect(std.mem.indexOf(u8, code, "pub const ListActionRunsParams = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn listActionRuns(client: *Client, options: ListActionRunsParams) ") != null);
+
+    // An operation id already in camel case only has its type capitalized.
+    try testing.expect(std.mem.indexOf(u8, code, "pub const GetPetParams = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn getPet(client: *Client, options: GetPetParams) ") != null);
+
+    try testing.expect(std.mem.indexOf(u8, code, "Options") == null);
+}
+
+// Forgejo's renderMarkdown owns renderMarkdownRaw through its Raw form, which
+// is also the operation id of the operation next to it.
+const spec_with_raw_form_collision =
+    \\{
+    \\  "openapi": "3.0.0",
+    \\  "info": { "title": "Naming", "version": "1.0.0" },
+    \\  "paths": {
+    \\    "/markdown": {
+    \\      "post": {
+    \\        "operationId": "renderMarkdown",
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    },
+    \\    "/markdown/raw": {
+    \\      "post": {
+    \\        "operationId": "renderMarkdownRaw",
+    \\        "responses": { "200": { "description": "ok" } }
+    \\      }
+    \\    }
+    \\  }
+    \\}
+;
+
+test "an operation name override resolves a collision without a suffix" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    const suffixed = try generateClient(allocator, spec_with_raw_form_collision, .{ .input_path = "fixture.json" });
+    defer allocator.free(suffixed);
+    try testing.expect(std.mem.indexOf(u8, suffixed, "pub fn renderMarkdownRaw_(client: *Client) ") != null);
+
+    const code = try generateClient(allocator, spec_with_raw_form_collision, .{
+        .input_path = "fixture.json",
+        // Applied as given: camel-case does not touch an override.
+        .operation_names = .camel_case,
+        .operation_name_overrides = &.{.{ .operation_id = "renderMarkdownRaw", .name = "RenderRawMarkdown" }},
+    });
+    defer allocator.free(code);
+
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn renderMarkdown(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn renderMarkdownRaw(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn RenderRawMarkdown(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "pub fn RenderRawMarkdownRaw(client: *Client) ") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "renderMarkdownRaw_") == null);
 }

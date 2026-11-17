@@ -495,3 +495,39 @@ test "multiple-clients PerTag dedupes derived Raw/Result/Streaming method names"
     try std.testing.expect(countSubstring(code, "pub fn getPetResult(self: *PetClient") == 1);
     try std.testing.expect(countSubstring(code, "pub fn listUsersRaw(self: *PetClient") == 1);
 }
+
+test "multiple-clients PerTag puts an operation on the client of every tag it carries" {
+    const allocator = std.testing.allocator;
+
+    var paths = std.StringHashMap(common.PathItem).init(allocator);
+    try paths.put(try allocator.dupe(u8, "/user/repos"), .{
+        .post = try opWithTags(allocator, "createCurrentUserRepo", false, true, true, &.{ "repository", "user" }),
+    });
+    // The same tag twice, and two spellings of one client, each list it once.
+    try paths.put(try allocator.dupe(u8, "/pets"), .{
+        .get = try opWithTags(allocator, "listPets", false, false, true, &.{ "pet", "pet", "Pet" }),
+    });
+    var document: common.UnifiedDocument = .{
+        .version = "3.0.0",
+        .info = .{ .title = "fixture", .version = "1.0.0" },
+        .paths = paths,
+    };
+    defer document.deinit(allocator);
+
+    var generator = UnifiedApiGenerator.init(allocator, .{
+        .input_path = "fixture.json",
+        .multiple_clients = .per_tag,
+    });
+    defer generator.deinit();
+
+    const code = try generator.generate(document);
+    defer allocator.free(code);
+
+    try std.testing.expect(std.mem.indexOf(u8, code, "pub fn createCurrentUserRepo(self: *RepositoryClient, requestBody: std.json.Value) !Owned(std.json.Value) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "pub fn createCurrentUserRepo(self: *UserClient, requestBody: std.json.Value) !Owned(std.json.Value) {") != null);
+    // Both methods call the one flat function; it is not generated twice.
+    try std.testing.expect(countSubstring(code, "pub fn createCurrentUserRepo(client: *Client") == 1);
+
+    try std.testing.expect(countSubstring(code, "pub fn listPets(self: *PetClient)") == 1);
+    try std.testing.expect(countSubstring(code, "pub const PetClient = struct {") == 1);
+}

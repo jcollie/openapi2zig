@@ -26,6 +26,9 @@ pub fn generateMultipleFiles(allocator: std.mem.Allocator, io: std.Io, cwd: std.
 
     var model_generator = UnifiedModelGenerator.init(allocator);
     model_generator.generate_enums = args.generate_enums;
+    model_generator.doc_comments = args.doc_comments;
+    model_generator.model_naming = args.model_naming;
+    model_generator.string_enums = args.string_enums;
     defer model_generator.deinit();
     const generated_models = try model_generator.generate(unified_doc);
     defer allocator.free(generated_models);
@@ -104,4 +107,9 @@ pub fn generateMultipleFiles(allocator: std.mem.Allocator, io: std.Io, cwd: std.
     defer allocator.free(generated_api);
 
     try writeFile(allocator, io, cwd, dir_path, client_file, generated_api, args.force);
+
+    // `--split-by-tag` puts the operations in files next to the client file.
+    for (api_generator.split_files.items) |split_file| {
+        try writeFile(allocator, io, cwd, dir_path, split_file.name, split_file.content, args.force);
+    }
 }

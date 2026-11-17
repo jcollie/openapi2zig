@@ -2,6 +2,7 @@ const std = @import("std");
 const UnifiedDocument = @import("../../../models/common/document.zig").UnifiedDocument;
 const Operation = @import("../../../models/common/document.zig").Operation;
 const ident = @import("../ident_utils.zig");
+const stream_parameters = @import("streaming.zig");
 const helpers = @import("helpers.zig");
 const OperationRef = helpers.OperationRef;
 const ResourceWrapper = helpers.ResourceWrapper;
@@ -54,7 +55,8 @@ pub fn generateResourceWrappers(self: *UnifiedApiGenerator, document: UnifiedDoc
             self.allocator.free(segments);
         }
 
-        try wrappers.append(self.allocator, .{
+        try wrappers.ensureUnusedCapacity(self.allocator, 1);
+        wrappers.appendAssumeCapacity(.{
             .segments = segments,
             .method_name = try self.resourceMethodName(operation_id, op_ref.method),
             .operation_id = operation_id,
@@ -158,7 +160,7 @@ fn reserveRootAliasAlloc(self: *UnifiedApiGenerator, wrappers: []const ResourceW
             try std.fmt.allocPrint(self.allocator, "_root{d}", .{suffix});
         errdefer self.allocator.free(candidate);
 
-        if (!self.isInlinedModelName(candidate) and !wrapperDeclaresName(wrappers, candidate)) {
+        if (!self.isInlinedModelName(candidate) and !self.flat_parameter_names.contains(candidate) and !wrapperDeclaresName(wrappers, candidate)) {
             return candidate;
         }
         self.allocator.free(candidate);
@@ -214,24 +216,47 @@ pub fn generateResourceLevel(self: *UnifiedApiGenerator, wrappers: []ResourceWra
 
     for (wrappers) |wrapper| {
         if (wrapper.segments.len == depth) {
+            try allocated_declarations.ensureUnusedCapacity(self.allocator, 4);
             const name = try self.resourceWrapperNameAlloc(wrapper);
-            try allocated_declarations.append(self.allocator, name);
+            allocated_declarations.appendAssumeCapacity(name);
             try declarations.append(self.allocator, name);
             if (self.hasReturnValue(wrapper.method, wrapper.operation)) {
                 const result_name = try std.fmt.allocPrint(self.allocator, "{s}Result", .{name});
-                try allocated_declarations.append(self.allocator, result_name);
+                allocated_declarations.appendAssumeCapacity(result_name);
                 try declarations.append(self.allocator, result_name);
             }
             if (wrapper.operation.streaming and std.mem.eql(u8, wrapper.method, "POST")) {
                 const stream_decl_name = try std.fmt.allocPrint(self.allocator, "{s}Stream", .{wrapper.operation_id});
+                allocated_declarations.appendAssumeCapacity(stream_decl_name);
                 try declarations.append(self.allocator, stream_decl_name);
-                try allocated_declarations.append(self.allocator, stream_decl_name);
                 const events_decl_name = try std.fmt.allocPrint(self.allocator, "{s}StreamEvents", .{wrapper.operation_id});
+                allocated_declarations.appendAssumeCapacity(events_decl_name);
                 try declarations.append(self.allocator, events_decl_name);
-                try allocated_declarations.append(self.allocator, events_decl_name);
             }
         }
     }
+
+    var stream_aliases = std.ArrayList([]const u8).empty;
+    defer stream_aliases.deinit(self.allocator);
+    for (wrappers) |wrapper| {
+        if (wrapper.segments.len != depth or wrapper.collides or std.mem.eql(u8, wrapper.method_name, wrapper.operation_id)) continue;
+        if (!wrapper.operation.streaming or !std.mem.eql(u8, wrapper.method, "POST")) continue;
+        try allocated_declarations.ensureUnusedCapacity(self.allocator, 2);
+        const stream_decl_name = try std.fmt.allocPrint(self.allocator, "{s}Stream", .{wrapper.method_name});
+        allocated_declarations.appendAssumeCapacity(stream_decl_name);
+        const events_decl_name = try std.fmt.allocPrint(self.allocator, "{s}StreamEvents", .{wrapper.method_name});
+        allocated_declarations.appendAssumeCapacity(events_decl_name);
+        if (containsString(declarations.items, stream_decl_name) or containsString(declarations.items, events_decl_name)) continue;
+        // Declaring an inlined model's name here would make it ambiguous inside the wrappers.
+        if (self.isInlinedModelName(stream_decl_name) or self.isInlinedModelName(events_decl_name)) continue;
+        try declarations.append(self.allocator, stream_decl_name);
+        try declarations.append(self.allocator, events_decl_name);
+        try stream_aliases.append(self.allocator, stream_decl_name);
+    }
+
+    const outer_scope = self.parameter_scope_names;
+    self.parameter_scope_names = declarations.items;
+    defer self.parameter_scope_names = outer_scope;
 
     for (wrappers) |wrapper| {
         if (wrapper.segments.len == depth) {
@@ -242,7 +267,12 @@ pub fn generateResourceLevel(self: *UnifiedApiGenerator, wrappers: []ResourceWra
             if (wrapper.operation.streaming and std.mem.eql(u8, wrapper.method, "POST")) {
                 const stream_name = try std.fmt.allocPrint(self.allocator, "{s}Streaming", .{wrapper.operation_id});
                 defer self.allocator.free(stream_name);
-                try self.generateResourceStreamMethods(wrapper, stream_name, indent);
+                try self.generateResourceStreamMethods(wrapper, wrapper.operation_id, stream_name, indent);
+                const alias_name = try std.fmt.allocPrint(self.allocator, "{s}Stream", .{wrapper.method_name});
+                defer self.allocator.free(alias_name);
+                if (containsString(stream_aliases.items, alias_name)) {
+                    try self.generateResourceStreamMethods(wrapper, wrapper.method_name, stream_name, indent);
+                }
             }
         }
     }
@@ -323,31 +353,38 @@ pub fn resourceWrapperNameAlloc(self: *UnifiedApiGenerator, wrapper: ResourceWra
     return try std.fmt.allocPrint(self.allocator, "{s}_", .{collision_name});
 }
 
-pub fn generateResourceStreamMethods(self: *UnifiedApiGenerator, wrapper: ResourceWrapper, stream_name: []const u8, indent: usize) !void {
-    const stream_method_name = try std.fmt.allocPrint(self.allocator, "{s}Stream", .{wrapper.operation_id});
+pub fn generateResourceStreamMethods(self: *UnifiedApiGenerator, wrapper: ResourceWrapper, name_prefix: []const u8, stream_name: []const u8, indent: usize) !void {
+    const stream_method_name = try std.fmt.allocPrint(self.allocator, "{s}Stream", .{name_prefix});
     defer self.allocator.free(stream_method_name);
-    const events_method_name = try std.fmt.allocPrint(self.allocator, "{s}StreamEvents", .{wrapper.operation_id});
+    const events_method_name = try std.fmt.allocPrint(self.allocator, "{s}StreamEvents", .{name_prefix});
     defer self.allocator.free(events_method_name);
 
     try self.appendIndent(indent);
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.buffer.appendSlice(self.allocator, stream_method_name);
-    try self.buffer.appendSlice(self.allocator, "(client: *Client, requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+    try self.buffer.appendSlice(self.allocator, "(client: *Client");
+    try stream_parameters.appendParameters(self, wrapper.operation, wrapper.path);
+    try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
     try self.appendIndent(indent + 1);
     try self.buffer.appendSlice(self.allocator, "return ");
     try self.buffer.appendSlice(self.allocator, stream_name);
-    try self.buffer.appendSlice(self.allocator, "(client, requestBody, callback, cancellation_token);\n");
+    try stream_parameters.appendCall(self, wrapper.operation, "client", false);
+    try self.buffer.appendSlice(self.allocator, ";\n");
     try self.appendIndent(indent);
     try self.buffer.appendSlice(self.allocator, "}\n");
 
     try self.appendIndent(indent);
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.buffer.appendSlice(self.allocator, events_method_name);
-    try self.buffer.appendSlice(self.allocator, "(comptime Event: type, client: *Client, requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+    try self.buffer.appendSlice(self.allocator, "(comptime Event: type, client: *Client");
+    try stream_parameters.appendParameters(self, wrapper.operation, wrapper.path);
+    try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
     try self.appendIndent(indent + 1);
     try self.buffer.appendSlice(self.allocator, "return ");
     try self.buffer.appendSlice(self.allocator, stream_name);
-    try self.buffer.appendSlice(self.allocator, "Events(Event, client, requestBody, callback, cancellation_token);\n");
+    try self.buffer.appendSlice(self.allocator, "Events");
+    try stream_parameters.appendCall(self, wrapper.operation, "client", true);
+    try self.buffer.appendSlice(self.allocator, ";\n");
     try self.appendIndent(indent);
     try self.buffer.appendSlice(self.allocator, "}\n");
 }
@@ -373,8 +410,11 @@ pub fn appendOperationParameters(self: *UnifiedApiGenerator, operation: Operatio
         }
         for (params) |param| {
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendParameterName(name, forbidden_names);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendParameterName(param.name, forbidden_names);
+            }
             try self.buffer.appendSlice(self.allocator, ": ");
             if ((param.location == .query or param.location == .header) and !param.required) {
                 try self.buffer.appendSlice(self.allocator, "?");
@@ -397,22 +437,21 @@ pub fn appendWrapperCallArguments(self: *UnifiedApiGenerator, operation: Operati
         for (params) |param| {
             if (self.args.parameters_as_struct and param.location != .body) continue;
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendParameterName(name, forbidden_names);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendParameterName(param.name, forbidden_names);
+            }
         }
     }
     try self.buffer.appendSlice(self.allocator, ")");
 }
 
 pub fn appendParameterName(self: *UnifiedApiGenerator, name: []const u8, forbidden_names: []const []const u8) !void {
-    if (containsString(forbidden_names, name)) {
-        const safe_name = try self.sanitizeIdentifierAlloc(name);
-        defer self.allocator.free(safe_name);
-        try self.buffer.appendSlice(self.allocator, safe_name);
-        try self.buffer.appendSlice(self.allocator, "_param");
-    } else {
-        try self.appendFlatParamIdentifier(name);
-    }
+    const outer_scope = self.parameter_scope_names;
+    self.parameter_scope_names = forbidden_names;
+    defer self.parameter_scope_names = outer_scope;
+    try self.appendFlatParamIdentifier(name);
 }
 
 pub fn resourceAliasConflicts(self: *UnifiedApiGenerator, alias: []const u8, document: UnifiedDocument) bool {
@@ -536,13 +575,29 @@ pub fn resourceSegmentsFromPath(self: *UnifiedApiGenerator, path: []const u8) ![
     var iterator = std.mem.splitScalar(u8, path, '/');
     while (iterator.next()) |raw_segment| {
         if (raw_segment.len == 0 or isVersionSegment(raw_segment) or isPathParam(raw_segment)) continue;
-        try segments.append(self.allocator, try self.sanitizeIdentifierAlloc(raw_segment));
+        try segments.ensureUnusedCapacity(self.allocator, 1);
+        segments.appendAssumeCapacity(try self.sanitizeIdentifierAlloc(raw_segment));
     }
     return try segments.toOwnedSlice(self.allocator);
 }
 
 pub fn resourceMethodName(self: *UnifiedApiGenerator, operation_id: []const u8, method: []const u8) ![]const u8 {
-    _ = method;
+    // Suffix-style operation ids (messages_post, models_list) are common
+    // outside camelCase APIs. Keep the flat id and offer a short resource name.
+    if (std.mem.lastIndexOfScalar(u8, operation_id, '_')) |separator| {
+        const suffix = operation_id[separator + 1 ..];
+        const suffix_verbs = .{
+            .{ "post", "POST", "create" },
+            .{ "list", "GET", "list" },
+            .{ "get", "GET", "retrieve" },
+            .{ "delete", "DELETE", "delete" },
+            .{ "patch", "PATCH", "update" },
+            .{ "put", "PUT", "update" },
+        };
+        inline for (suffix_verbs) |verb| {
+            if (std.mem.eql(u8, suffix, verb[0]) and std.mem.eql(u8, method, verb[1])) return self.allocator.dupe(u8, verb[2]);
+        }
+    }
     const verbs = [_]struct { prefix: []const u8, name: []const u8 }{
         .{ .prefix = "create", .name = "create" },
         .{ .prefix = "list", .name = "list" },

@@ -4,6 +4,7 @@ const Operation = @import("../../../models/common/document.zig").Operation;
 const Parameter = @import("../../../models/common/document.zig").Parameter;
 const helpers = @import("helpers.zig");
 const classifyBody = helpers.classifyBody;
+const usesMultipart = helpers.usesMultipart;
 const UnifiedApiGenerator = @import("../api_generator.zig").UnifiedApiGenerator;
 
 pub fn appendFlatCallArguments(self: *UnifiedApiGenerator, operation: Operation) !void {
@@ -19,8 +20,11 @@ pub fn appendFlatCallArguments(self: *UnifiedApiGenerator, operation: Operation)
         for (params) |param| {
             if (self.args.parameters_as_struct and param.location != .body) continue;
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendFlatParamIdentifier(name);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendFlatParamIdentifier(param.name);
+            }
         }
     }
     try self.buffer.appendSlice(self.allocator, ")");
@@ -38,6 +42,8 @@ pub fn appendParamBaseType(self: *UnifiedApiGenerator, param: Parameter) !void {
         } else {
             try self.buffer.appendSlice(self.allocator, "std.json.Value");
         }
+    } else if (param.file) {
+        try self.buffer.appendSlice(self.allocator, "FormFile");
     } else {
         if (param.schema) |schema| {
             try self.appendZigQueryTypeFromSchema(schema);
@@ -97,15 +103,26 @@ pub fn appendOptionsTypeName(self: *UnifiedApiGenerator, operation: Operation, m
 }
 
 pub fn appendRawOptionsTypeName(self: *UnifiedApiGenerator, operation: Operation, path: []const u8) !void {
-    if (self.operationNameOf(operation)) |op_id| {
-        const name = try std.fmt.allocPrint(self.allocator, "{s}Options", .{op_id});
-        defer self.allocator.free(name);
+    const name = try self.optionsTypeBaseNameAlloc(operation, path);
+    defer self.allocator.free(name);
+    if (self.operationNameOf(operation) != null) {
         try self.appendIdentifier(name);
     } else {
-        const name = try std.fmt.allocPrint(self.allocator, "operation{s}Options", .{path[1..]});
-        defer self.allocator.free(name);
         try self.appendEscapedIdentifier(name);
     }
+}
+
+/// The type name an operation's parameters struct is given before any
+/// collision suffix: the operation name, or `operation` and the path when it
+/// has none, followed by the configured suffix. With camel-case operation
+/// names the first letter is capitalized, since the name is a type's.
+pub fn optionsTypeBaseNameAlloc(self: *UnifiedApiGenerator, operation: Operation, path: []const u8) ![]u8 {
+    const name = if (self.operationNameOf(operation)) |op_id|
+        try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ op_id, self.args.params_suffix })
+    else
+        try std.fmt.allocPrint(self.allocator, "operation{s}{s}", .{ path[1..], self.args.params_suffix });
+    if (self.args.operation_names == .camel_case and name.len > 0) name[0] = std.ascii.toUpper(name[0]);
+    return name;
 }
 
 /// Emit a top-level declaration of the options struct type for an
@@ -122,12 +139,9 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
     }
     if (count == 0) return;
 
-    var candidate = if (self.operationNameOf(operation)) |op_id|
-        try std.fmt.allocPrint(self.allocator, "{s}Options", .{op_id})
-    else
-        try std.fmt.allocPrint(self.allocator, "operation{s}Options", .{path[1..]});
+    var candidate: []const u8 = try self.optionsTypeBaseNameAlloc(operation, path);
     defer self.allocator.free(candidate);
-    while (self.topLevelNameConflicts(candidate, document)) {
+    while (try self.topLevelNameConflicts(candidate, document)) {
         const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{candidate});
         self.allocator.free(candidate);
         candidate = suffixed;
@@ -135,6 +149,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
     const key = try self.optionsTypeKeyAlloc(operation, method, path);
     defer self.allocator.free(key);
     if (self.options_type_names.fetchRemove(key)) |kv| {
+        _ = self.options_name_set.remove(kv.value);
         self.allocator.free(kv.key);
         self.allocator.free(kv.value);
     }
@@ -143,9 +158,16 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
         errdefer self.allocator.free(key_copy_);
         const candidate_copy_ = try self.allocator.dupe(u8, candidate);
         errdefer self.allocator.free(candidate_copy_);
+        try self.options_name_set.put(candidate_copy_, {});
+        errdefer _ = self.options_name_set.remove(candidate_copy_);
         try self.options_type_names.put(key_copy_, candidate_copy_);
     }
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// The values `");
+        try self.buffer.appendSlice(self.allocator, self.operationNameOf(operation) orelse path);
+        try self.buffer.appendSlice(self.allocator, "` is called with, all but its request body.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub const ");
     try self.appendOptionsTypeName(operation, method, path);
     try self.buffer.appendSlice(self.allocator, " = struct {\n");
@@ -154,6 +176,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
             if (param.location == .body) continue;
             const field_name = try self.optionsFieldNameAlloc(operation, method, path, i);
             defer self.allocator.free(field_name);
+            try self.appendDocComment("    ", param.description);
             try self.buffer.appendSlice(self.allocator, "    ");
             try self.appendFieldIdentifier(field_name);
             try self.buffer.appendSlice(self.allocator, ": ");
@@ -273,18 +296,23 @@ pub fn appendFlatOperationParameters(self: *UnifiedApiGenerator, operation: Oper
         }
         for (params) |param| {
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendFlatParamIdentifier(name);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendFlatParamIdentifier(param.name);
+            }
             try self.buffer.appendSlice(self.allocator, ": ");
-            if ((param.location == .query or param.location == .header) and !param.required) try self.buffer.appendSlice(self.allocator, "?");
+            if ((param.location == .query or param.location == .header or param.location == .form) and !param.required) try self.buffer.appendSlice(self.allocator, "?");
             try self.appendParamBaseType(param);
         }
     }
 }
 
 pub fn appendUnusedParameters(self: *UnifiedApiGenerator, operation: Operation, method: []const u8, path: []const u8) !void {
+    const multipart = usesMultipart(operation);
     if (operation.parameters) |parameters| {
         for (parameters, 0..) |parameter, i| {
+            if (parameter.location == .form and multipart) continue;
             if (parameter.location != .path and parameter.location != .body and parameter.location != .query and parameter.location != .header) {
                 try self.buffer.appendSlice(self.allocator, "    _ = ");
                 try self.appendParamReference(operation, method, path, i, parameter);

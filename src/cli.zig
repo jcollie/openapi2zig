@@ -1,6 +1,4 @@
 const std = @import("std");
-const version_info = @import("build_info");
-const ident = @import("generators/unified/ident_utils.zig");
 
 const usage = @import("cli/usage.zig");
 pub const printUsage = usage.printUsage;
@@ -8,6 +6,8 @@ pub const printError = usage.printError;
 const types = @import("cli/types.zig");
 pub const ResourceWrapperMode = types.ResourceWrapperMode;
 pub const MultipleClientsMode = types.MultipleClientsMode;
+pub const OperationNameMode = types.OperationNameMode;
+pub const OperationNameOverride = types.OperationNameOverride;
 pub const FileKind = types.FileKind;
 pub const FileNameOverrides = types.FileNameOverrides;
 pub const CliArgs = types.CliArgs;
@@ -27,11 +27,13 @@ pub const findReservedAlias = file_names_mod.findReservedAlias;
 pub const validateFileName = file_names_mod.validateFileName;
 pub const isAbsoluteImportPath = file_names_mod.isAbsoluteImportPath;
 pub const validateImportPath = file_names_mod.validateImportPath;
+pub const isValidSdkName = @import("cli/sdk.zig").isValidSdkName;
 
 const parse_mod = @import("cli/parse.zig");
 pub const parse = parse_mod.parse;
 pub const parseResourceWrapperMode = parse_mod.parseResourceWrapperMode;
 pub const parseMultipleClientsMode = parse_mod.parseMultipleClientsMode;
+pub const parseOperationNameMode = parse_mod.parseOperationNameMode;
 
 test {
     _ = @import("cli/tests.zig");

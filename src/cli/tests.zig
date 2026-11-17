@@ -789,6 +789,76 @@ test "parse generate defaults parameters-as-struct to false" {
     try std.testing.expect(!parsed.args.parameters_as_struct);
 }
 
+test "parse generate defaults the naming options" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json" };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Options", parsed.args.params_suffix);
+    try std.testing.expectEqual(.preserve, parsed.args.operation_names);
+}
+
+test "parse generate supports params-suffix and operation-names" {
+    const argv = [_][:0]const u8{
+        "openapi2zig",            "generate",
+        "-i",                     "openapi.json",
+        "--parameters-as-struct", "--params-suffix",
+        "Params",                 "--operation-names",
+        "camel-case",
+    };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Params", parsed.args.params_suffix);
+    try std.testing.expectEqual(.camel_case, parsed.args.operation_names);
+}
+
+test "parse generate collects operation-name overrides" {
+    const argv = [_][:0]const u8{
+        "openapi2zig",      "generate",
+        "-i",               "openapi.json",
+        "--operation-name", "renderMarkdownRaw=renderRawMarkdown",
+        "--operation-name", "ActionRun=getActionRun",
+    };
+
+    var parsed = try parse(std.testing.allocator, &argv);
+    defer parsed.deinit(std.testing.allocator);
+
+    const overrides = parsed.args.operation_name_overrides;
+    try std.testing.expectEqual(@as(usize, 2), overrides.len);
+    try std.testing.expectEqualStrings("renderMarkdownRaw", overrides[0].operation_id);
+    try std.testing.expectEqualStrings("renderRawMarkdown", overrides[0].name);
+    try std.testing.expectEqualStrings("ActionRun", overrides[1].operation_id);
+    try std.testing.expectEqualStrings("getActionRun", overrides[1].name);
+}
+
+test "parse generate rejects bad naming options" {
+    const cases = [_][]const [:0]const u8{
+        // A suffix only means something on a parameters struct.
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--params-suffix", "Params" },
+        // It has to leave the type name an identifier.
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix", "Par-ams" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--parameters-as-struct", "--params-suffix", "A", "--params-suffix", "B" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-names", "snake" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-names" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--operation-names", "camel-case" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--params-suffix", "Params" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "=renderRawMarkdown" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=2render" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "renderMarkdownRaw=render-raw" },
+        &.{ "openapi2zig", "generate", "-i", "openapi.json", "--operation-name", "a=b", "--operation-name", "a=c" },
+        &.{ "openapi2zig", "generate", "--runtime-only", "--operation-name", "a=b" },
+    };
+    for (cases) |argv| {
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, argv));
+    }
+}
+
 test "parse accepts --runtime-module with --multiple-files" {
     const argv = [_][:0]const u8{
         "openapi2zig",
@@ -1355,4 +1425,143 @@ test "parseResourceWrapperMode rejects an unknown mode" {
     try std.testing.expectEqual(ResourceWrapperMode.paths, parseResourceWrapperMode("paths").?);
     try std.testing.expectEqual(ResourceWrapperMode.hybrid, parseResourceWrapperMode("hybrid").?);
     try std.testing.expect(parseResourceWrapperMode("sideways") == null);
+}
+
+test "parse generate supports sdk flags" {
+    const argv = [_][:0]const u8{
+        "openapi2zig",
+        "generate",
+        "--sdk",
+        "--sdk-name",
+        "petstore",
+        "--sdk-config",
+        "sdk.json",
+        "-i",
+        "openapi.json",
+        "-o",
+        "repo",
+    };
+
+    const parsed = try parse(std.testing.allocator, &argv);
+
+    try std.testing.expect(parsed.args.sdk);
+    try std.testing.expect(parsed.args.multiple_files);
+    try std.testing.expectEqualStrings("petstore", parsed.args.sdk_name.?);
+    try std.testing.expectEqualStrings("sdk.json", parsed.args.sdk_config_path.?);
+    try std.testing.expectEqualStrings("openapi.json", parsed.args.input_path);
+    try std.testing.expectEqualStrings("repo", parsed.args.output_path.?);
+}
+
+test "parse generate sdk does not require input" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "--sdk", "--sdk-name", "petstore" };
+
+    const parsed = try parse(std.testing.allocator, &argv);
+
+    try std.testing.expect(parsed.args.sdk);
+    try std.testing.expectEqualStrings("", parsed.args.input_path);
+}
+
+test "parse generate sdk defaults to disabled" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json" };
+
+    const parsed = try parse(std.testing.allocator, &argv);
+
+    try std.testing.expect(!parsed.args.sdk);
+    try std.testing.expect(parsed.args.sdk_name == null);
+    try std.testing.expect(parsed.args.sdk_config_path == null);
+}
+
+test "parse generate sdk rejects incompatible flags" {
+    const incompatible = [_][]const u8{ "--runtime-only", "--models-only", "--runtime-module=x.zig", "--file-name=models=m.zig" };
+    for (incompatible) |flag| {
+        var argv_list: [7][:0]const u8 = undefined;
+        argv_list[0] = "openapi2zig";
+        argv_list[1] = "generate";
+        argv_list[2] = "--sdk";
+        argv_list[3] = "--sdk-name";
+        argv_list[4] = "petstore";
+        var n: usize = 5;
+        if (std.mem.eql(u8, flag, "--runtime-only")) {
+            argv_list[n] = "--runtime-only";
+            n += 1;
+        } else if (std.mem.eql(u8, flag, "--models-only")) {
+            argv_list[n] = "--models-only";
+            n += 1;
+        } else if (std.mem.startsWith(u8, flag, "--runtime-module")) {
+            argv_list[n] = "--runtime-module";
+            argv_list[n + 1] = "x.zig";
+            n += 2;
+        } else {
+            argv_list[n] = "--file-name";
+            argv_list[n + 1] = "models=m.zig";
+            n += 2;
+        }
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, argv_list[0..n]));
+    }
+}
+
+test "parse generate sdk rejects invalid names" {
+    const bad = [_][:0]const u8{ "Pet Store", "9pets", "pet-store", "Pets", "fn" };
+    for (bad) |name| {
+        const argv = [_][:0]const u8{ "openapi2zig", "generate", "--sdk", "--sdk-name", name };
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, &argv));
+    }
+}
+
+test "parse generate sdk-only flags require --sdk" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json", "--sdk-name", "petstore" };
+    try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, &argv));
+}
+
+test "parse generate supports model-naming" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json", "--model-naming", "namespaced" };
+    const parsed = try parse(std.testing.allocator, &argv);
+    try std.testing.expectEqual(@import("../generators/unified/model_names.zig").Mode.namespaced, parsed.args.model_naming);
+
+    const defaults = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json" };
+    const parsed_defaults = try parse(std.testing.allocator, &defaults);
+    try std.testing.expectEqual(@import("../generators/unified/model_names.zig").Mode.raw, parsed_defaults.args.model_naming);
+
+    const invalid = [_][:0]const u8{ "openapi2zig", "generate", "-i", "openapi.json", "--model-naming", "fancy" };
+    try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, &invalid));
+}
+
+test "parse generate sdk rejects options that the config file controls" {
+    const options = [_][]const [:0]const u8{
+        &.{ "--resource-wrappers", "tags" },
+        &.{ "--multiple-clients", "PerTag" },
+        &.{ "--tag", "pets" },
+    };
+    for (options) |extra| {
+        var argv: [8][:0]const u8 = undefined;
+        argv[0] = "openapi2zig";
+        argv[1] = "generate";
+        argv[2] = "--sdk";
+        argv[3] = "--sdk-name";
+        argv[4] = "petstore";
+        var n: usize = 5;
+        for (extra) |arg| {
+            argv[n] = arg;
+            n += 1;
+        }
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, argv[0..n]));
+    }
+}
+
+test "parse generate sdk rejects names that collide with std" {
+    for ([_][:0]const u8{ "std", "builtin", "root" }) |name| {
+        const argv = [_][:0]const u8{ "openapi2zig", "generate", "--sdk", "--sdk-name", name };
+        try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, &argv));
+    }
+}
+
+test "parse generate sdk keeps parameters-as-struct" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "--sdk", "--sdk-name", "petstore", "--parameters-as-struct" };
+    const parsed = try parse(std.testing.allocator, &argv);
+    try std.testing.expect(parsed.args.parameters_as_struct);
+}
+
+test "parse generate sdk-config rejects an option as its value" {
+    const argv = [_][:0]const u8{ "openapi2zig", "generate", "--sdk", "--sdk-name", "petstore", "--sdk-config", "--force" };
+    try std.testing.expectError(error.InvalidArguments, parse(std.testing.allocator, &argv));
 }

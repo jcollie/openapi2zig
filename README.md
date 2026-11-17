@@ -1,6 +1,6 @@
 [![CI](https://github.com/christianhelle/openapi2zig/actions/workflows/ci.yml/badge.svg)](https://github.com/christianhelle/openapi2zig/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/christianhelle/openapi2zig/graph/badge.svg?token=F7YxJ0hTqr)](https://codecov.io/gh/christianhelle/openapi2zig)
-[![Zig Version](https://img.shields.io/badge/zig-0.16.0%2B-orange.svg)](https://ziglang.org/download/)
+[![Zig Version](https://img.shields.io/badge/zig-0.17.1%2B-orange.svg)](https://ziglang.org/download/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # openapi2zig
@@ -54,9 +54,11 @@ curl -fsSL https://christianhelle.com/openapi2zig/install | INSTALL_DIR=$HOME/.l
 Download the latest release for your platform from the [GitHub Releases page](https://github.com/christianhelle/openapi2zig/releases/latest):
 
 - **Linux x86_64:** `openapi2zig-linux-x86_64.tar.gz`
+- **Linux ARM64:** `openapi2zig-linux-aarch64.tar.gz`
 - **macOS x86_64:** `openapi2zig-macos-x86_64.tar.gz`
 - **macOS ARM64:** `openapi2zig-macos-aarch64.tar.gz`
 - **Windows x86_64:** `openapi2zig-windows-x86_64.zip`
+- **Windows ARM64:** `openapi2zig-windows-aarch64.zip`
 
 Extract the archive and add the binary to your PATH.
 
@@ -85,7 +87,8 @@ The image's entrypoint is the binary itself, so arguments are passed straight th
 
 ### Option 5: Build from Source
 
-Requires [Zig](https://ziglang.org/download/) v0.16.0.
+Requires [Zig](https://ziglang.org/download/) v0.17.0.
+Requires [Zig](https://ziglang.org/download/) v0.17.1.
 
 ```bash
 git clone https://github.com/christianhelle/openapi2zig.git
@@ -133,7 +136,7 @@ The `generate` command reads a JSON or YAML OpenAPI/Swagger document from a loca
 | `-o`, `--output <path>`       | Where the generated code is written. Without `--multiple-files` this is a file path, defaulting to `generated.zig` (or `runtime.zig` with `--runtime-only`). With `--multiple-files` it is the output directory instead, defaulting to `generated/`. Parent directories are created when needed.                                                                                                                                                           |
 | `--base-url <url>`            | Base URL baked into the generated `Client`. Defaults to the server URL from the OpenAPI/Swagger document.                                                                                                                                                                                                                                                                                                                                                  |
 | `--resource-wrappers <mode>`  | Generate resource wrapper namespaces. Modes: `none`, `tags`, `paths`, `hybrid`. Defaults to `paths`, except with `--multiple-clients`, where it defaults to `none`.                                                                                                                                                                                                                                                                                        |
-| `--multiple-clients <mode>`   | Generate per-tag or per-endpoint client structs that delegate to the flat API functions. Modes: `PerTag` (default when the flag is given without a value) and `PerEndpoint`. Mutually exclusive with a non-`none` `--resource-wrappers` and with `--models-only`.                                                                                                                                                                                          |
+| `--multiple-clients <mode>`   | Generate per-tag or per-endpoint client structs that delegate to the flat API functions. Modes: `PerTag` (default when the flag is given without a value) and `PerEndpoint`. With `PerTag`, an operation carrying several tags is a method on the client of each. Mutually exclusive with a non-`none` `--resource-wrappers` and with `--models-only`.                                                                                                                                                                                          |
 | `--tag <name>`                | Include only operations carrying the specified OpenAPI tag. Schemas are removed only when unreachable from retained operations; transitively referenced schemas remain preserved. Operations without any of the requested tags (including untagged operations) are skipped. The `--tag` option can be specified multiple times, e.g. `--tag pet --tag store --tag user`.                                                                                   |
 | `--models-only`               | Generate only Zig models, skipping the API client.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--multiple-files`            | Generate separate output files for models, runtime, and API client into the output directory specified by `-o`.                                                                                                                                                                                                                                                                                                                                            |
@@ -142,6 +145,14 @@ The `generate` command reads a JSON or YAML OpenAPI/Swagger document from a loca
 | `--runtime-only`              | Generate only the runtime module. No input spec is required; when `-i` is given it is ignored entirely. Without `--multiple-files`, writes the runtime module to `-o` (default `runtime.zig`). With `--multiple-files`, writes only the runtime file into the output directory (honors `--file-name runtime=...`). Mutually exclusive with `--models-only`, `--runtime-module`, and all client-related options.                                            |
 | `--force`                     | Force overwriting output even when unchanged (skip unchanged-content check).                                                                                                                                                                                                                                                                                                                                                                               |
 | `--parameters-as-struct`      | Wrap the method parameters of each operation in a single `options` struct instead of emitting them as individual function arguments. Optional query parameters become nullable fields defaulting to `null`; required path and query parameters stay non-optional. The request body, when present, remains a separate `requestBody` argument.                                                                                                               |
+| `--sdk`                       | Generate a complete SDK repository (sources, build files, docs, CI, examples) into the output directory. Implies `--multiple-files`. See [Generating a full SDK repository](#generating-a-full-sdk-repository). |
+| `--sdk-config <path>`         | SDK config file. Defaults to `<output>/openapi2zig.json`. |
+| `--sdk-name <name>`           | Package name (a lowercase Zig identifier). Required on the first run, when no config file exists yet. |
+| `--model-naming <mode>`       | `raw` (default) keeps schema names as written, so `microsoft.graph.user` becomes `@"microsoft.graph.user"`. `namespaced` drops the prefix every dotted name shares and uses PascalCase: `User`, `SecurityAlert`, with nested aliases such as `security.Alert`. |
+| `--string-enums`              | Declare named string enums as Zig enums with an `_unknown` member: a value the spec does not list parses as `_unknown` instead of failing. An unknown value is written back as `null`. |
+| `--pagination`                | For operations marked `x-ms-pageable` (OpenAPI 3.0), generate `<operation>Pages`, which returns a `Pager`. Call `advance()` to follow the next link; links to another host are refused. |
+| `--typed-errors`              | Generate `ApiError` (the error model most error responses use) and `parseApiError(allocator, raw)`. |
+| `--split-by-tag`              | With `--multiple-files`, write the operations of each tag to `client/<tag>.zig`. `client.zig` keeps the client and re-exports every operation, so the API is unchanged. Cannot be combined with `--multiple-clients`, `--models-only`, `--runtime-module` or `--file-name`. |
 
 ### Unchanged output is not rewritten
 
@@ -297,6 +308,60 @@ openapi2zig generate -i openapi/v3.1/lmstudio.json -o generated/lmstudio --multi
 
 When `--runtime-module` is given, no `runtime.zig` is emitted in the output directory; `client.zig` instead contains `const runtime = @import("../shared/runtime.zig");` (alias derived from the file basename, e.g. `my_runtime` for `my_runtime.zig`) and re-exports `Owned`, `RawResponse`, etc. from that module. The flag requires `--multiple-files` and is mutually exclusive with `--file-name runtime=...`. If the target file does not yet exist, generation still succeeds with an info log so you can generate the shared runtime first, for example with `openapi2zig generate --runtime-only -o generated/shared --multiple-files`.
 
+### Generating a full SDK repository
+
+`--sdk` generates a complete, production-ready Zig package instead of bare sources: the generated `models.zig`, `runtime.zig` and `client.zig` under `src/`, plus `root.zig`, `compile_check.zig`, `build.zig`, `build.zig.zon`, README, LICENSE, CHANGELOG, docs, CI and release workflows, and a quickstart example.
+
+```bash
+# first run: names the package and writes openapi2zig.json
+openapi2zig generate --sdk --sdk-name petstore -i openapi/petstore.json -o my-sdk
+
+# later runs read my-sdk/openapi2zig.json
+openapi2zig generate --sdk -o my-sdk
+```
+
+Settings live in `openapi2zig.json` at the repository root:
+
+```json
+{
+  "name": "petstore",
+  "version": "0.1.0",
+  "description": "Petstore SDK for Zig",
+  "repository": "https://github.com/OWNER/petstore-sdk-for-zig",
+  "author": "Your Name",
+  "license": "MIT",
+  "minimum_zig_version": "0.17.1",
+  "spec": "openapi/openapi.json",
+  "base_url": null,
+  "generator": {
+    "resource_wrappers": "paths",
+    "parameters_as_struct": false,
+    "tags": [],
+    "model_naming": "raw",
+    "string_enums": false,
+    "pagination": false,
+    "typed_errors": false,
+    "split_by_tag": false
+  },
+  "retry": { "max_retries": 0 },
+  "auth": {
+    "oauth2": {
+      "token_url": "https://login.example.com/{tenant}/oauth2/v2.0/token",
+      "device_authorization_url": "https://login.example.com/{tenant}/oauth2/v2.0/devicecode",
+      "scopes": ["https://api.example.com/.default"]
+    }
+  }
+}
+```
+
+`base_url` defaults to the first server of the spec. Unknown keys are rejected so typos are not ignored.
+
+Files are either *generated* or *scaffold*. Generated files (`src/*`, `build.zig`, `.gitattributes`, `docs/REGENERATING.md`) are rewritten whenever their content changes. Scaffold files (`build.zig.zon`, `README.md`, `LICENSE`, `CHANGELOG.md`, `.gitignore`, `docs/USAGE.md`, the workflows and `examples/quickstart.zig`) are written once and then belong to you, so edit them freely; `--force` overwrites them. Every `examples/*.zig` file you add is picked up by the generated `build.zig`. `LICENSE` is only written for `"license": "MIT"`.
+
+With `auth.oauth2` configured the SDK also gets `src/auth.zig` (client credentials and device code flows that cache and refresh tokens), `sdk.clientCredentials` and `sdk.deviceCode` helpers, and `examples/client_credentials.zig` and `examples/device_code.zig`. Every client accepts a `TokenProvider`, so `sdk.initWithTokenProvider` works with your own token source too. `retry.max_retries` makes `sdk.init` retry throttled (429) and temporarily unavailable (503, 504) responses, honoring `Retry-After`.
+
+Inside the new repository, `zig build test`, `zig build check` (compiles every operation) and `zig build examples` verify the SDK. `zig build test-sdk` in this repository does exactly that for a petstore SDK.
+
 ### Upgrading
 
 `openapi2zig upgrade` checks for the latest release, downloads it, and replaces the current binary.
@@ -403,6 +468,20 @@ pub fn main(init: std.process.Init) !void {
 ```
 
 #### Generate clients from a build step
+
+To invoke the CLI from a dependency, use its named executable path. The executable and static library both have the artifact name `openapi2zig`, so `artifact("openapi2zig")` is ambiguous. Target the host when running the generator during a build.
+
+```zig
+const dep = b.dependency("openapi2zig", .{
+    .target = b.graph.host,
+    .optimize = .ReleaseSafe,
+});
+const generate = b.addRunFile(dep.namedLazyPath("openapi2zig-cli"));
+generate.addArgs(&.{ "generate", "-i" });
+generate.addFileArg(b.path("openapi/api.json"));
+generate.addArg("-o");
+const generated = generate.addOutputFileArg("api.zig");
+```
 
 For generated clients that are committed to your repository, keep regeneration opt-in so ordinary builds and tests do not fetch or run the generator. This pattern mirrors `puny`'s [`regenerate-providers` build step](https://github.com/christianhelle/puny/blob/main/build.zig) and [generation tool](https://github.com/christianhelle/puny/blob/main/tools/generate_providers.zig).
 
@@ -569,7 +648,7 @@ Generated files are self-contained Zig source files. The current unified generat
   - `operationResult(...) !ApiResult(T)` for parsed success plus preserved API/parse-error bodies.
 - Generic helpers such as `requestRaw`, `getRaw`, `postJsonRaw`, `getJsonResult`, and `postJsonResult`.
 - Query parameter helpers that percent-encode names and string values with `std.Uri.Component.percentEncode`; optional query parameters are nullable.
-- Bounded SSE parsing helpers: `parseSseBytes`, `parseSseReader`, `parseSseBytesTyped`, and `parseSseReaderTyped`. SSE buffer size is fixed at 256KB for lines and 1MB for events. Stream helpers are generated for every POST operation whose response declares `text/event-stream` content — the function name is `{operationId}Streaming` (with an `Events` variant for typed JSON events). Setting `Client.cancel_check` enables prompt cancellation even while a socket read is stalled when the watcher thread starts successfully: the watcher polls every 10 ms, interrupts the socket, and marks the HTTP connection as closing during synchronized cleanup. No watcher thread is spawned when `cancel_check` is null, and a failed thread spawn falls back to read-boundary cancellation.
+- Bounded SSE parsing helpers: `parseSseBytes`, `parseSseReader`, `parseSseBytesTyped`, and `parseSseReaderTyped`. SSE buffer size is fixed at 256KB for lines and 1MB for events. Stream helpers are generated for POST operations with a `text/event-stream` response or a boolean `stream` field in the request body — the function name is `{operationId}Streaming` (with an `Events` variant for typed JSON events). Resource wrappers expose these as `{operationId}Stream` and, when the short name is free, `{method}Stream`, such as `resources.messages.createStream`. Setting `Client.cancel_check` enables prompt cancellation even while a socket read is stalled when the watcher thread starts successfully: the watcher polls every 10 ms, interrupts the socket, and marks the HTTP connection as closing during synchronized cleanup. No watcher thread is spawned when `cancel_check` is null, and a failed thread spawn falls back to read-boundary cancellation.
 - Resource wrapper namespaces by default, for example `pet.get(...)` and `store.order.get(...)`, derived from paths unless `--resource-wrappers` changes the mode. Wrapper names are sanitized generated conveniences, not hand-designed SDK names.
 
 Parsed JSON responses use `.ignore_unknown_fields = true` so compatible providers can add response fields without breaking callers. Ambiguous or intentionally open-ended schemas use `std.json.Value`. For OpenAPI 3.1, the converter has stronger composite-schema handling for object/ref `allOf`, preserved `oneOf`/`anyOf` metadata, and nullable type arrays; do not assume every converter has identical composite support.
@@ -585,10 +664,22 @@ Schemas map to Zig types as follows:
 | `type: boolean`                                                                  | `bool`                                                                 |
 | `type: array` with a known `items` type                                          | `[]const T`                                                            |
 | `type: array` with no usable `items` type                                        | `[]const std.json.Value`                                               |
-| schema with `properties`                                                         | a generated `struct`, even when `type` is omitted                      |
+| schema with `properties`, no composition, and `additionalProperties` absent, `false` or a schema | a generated `struct`, even when `type` is omitted       |
+| `properties` with explicit `additionalProperties: true`                            | `std.json.Value`, except the extensible request structs described below |
+| `properties` with `oneOf`/`anyOf`, or both composition keywords together           | `std.json.Value` to retain all fields                                  |
 | free-form object, `oneOf`/`anyOf` without a usable discriminator, unknown schema | `std.json.Value`                                                       |
 
 Fields not listed in `required` are emitted as optionals defaulting to `null`.
+
+Component names remain unchanged so `$ref` references keep their meaning. When an inline helper name conflicts with a component or another helper, the generator adds a numeric suffix and uses that name consistently.
+
+Objects with named properties and explicit `additionalProperties: true` use `std.json.Value` when a closed Zig struct would discard unknown keys. Schema-valued `additionalProperties` keep a typed struct so the named fields stay accessible, and keys outside the named properties are ignored when parsing. This preserves arbitrary JSON schema keywords, including those in Anthropic's `InputSchema`. These values are not validated against the declared property types. The existing extensible OpenAI request structs retain their `extra_body` support.
+
+For OpenAPI 3.1 specifications without `info.version`, the CLI prints a warning and uses `"unknown"` metadata. A present version must be a string. The generator still processes the entire specification; missing metadata does not filter operations or schemas.
+
+Ordinary and streaming requests forward declared header parameters. Passing `null`, or leaving an optional field unset with `--parameters-as-struct`, keeps the client default header. Explicit values replace defaults without regard to header-name case. Suffix-style operation IDs also get short resource names, e.g. `resources.messages.create` for `messages_post` and `resources.models.list` for `models_list`.
+
+Generated calls without a request body follow up to three redirects, like `std.http.Client.fetch`, and return `error.TooManyHttpRedirects` beyond that. Credentials and other caller headers, including `default_headers`, are only sent while the scheme, host and port stay the same, so a redirect to another origin never receives them. Calls with a request body do not follow redirects: raw calls retain the 3xx status and response body, and streaming calls return `error.ResponseError`. Non-streaming response bodies are currently buffered without a size limit; callers should only use trusted endpoints and allow for their response sizes.
 
 ### Request body content types
 
@@ -769,7 +860,7 @@ This section covers setting up the repository for development and contributing t
 
 ### Prerequisites
 
-- [Zig](https://ziglang.org/download/) v0.16.0
+- [Zig](https://ziglang.org/download/) v0.17.1
 
 ### Development Environment
 
@@ -851,7 +942,10 @@ Build for different targets:
 
 ```bash
 # Windows
-zig build -Dtarget=x86_64-windows
+zig build -Dtarget=x86_64-windows-gnu
+
+# Windows ARM64
+zig build -Dtarget=aarch64-windows-gnu
 
 # macOS
 zig build -Dtarget=x86_64-macos

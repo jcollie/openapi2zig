@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime_types = @import("runtime_types.zig").runtime_types;
 
 pub const RuntimeGenerator = struct {
     allocator: std.mem.Allocator,
@@ -29,56 +30,7 @@ pub const RuntimeGenerator = struct {
     }
 
     fn generateRuntimeTypes(self: *RuntimeGenerator) !void {
-        try self.buffer.appendSlice(self.allocator,
-            \\pub fn Owned(comptime T: type) type {
-            \\    return struct {
-            \\        allocator: std.mem.Allocator,
-            \\        body: []u8,
-            \\        parsed: std.json.Parsed(T),
-            \\
-            \\        pub fn deinit(self: *@This()) void {
-            \\            self.parsed.deinit();
-            \\            self.allocator.free(self.body);
-            \\        }
-            \\
-            \\        pub fn value(self: *@This()) *T {
-            \\            return &self.parsed.value;
-            \\        }
-            \\    };
-            \\}
-            \\
-            \\pub const RawResponse = struct {
-            \\    allocator: std.mem.Allocator,
-            \\    status: std.http.Status,
-            \\    body: []u8,
-            \\
-            \\    pub fn deinit(self: *@This()) void {
-            \\        self.allocator.free(self.body);
-            \\    }
-            \\};
-            \\
-            \\pub const ParseErrorResponse = struct {
-            \\    raw: RawResponse,
-            \\    error_name: []const u8,
-            \\};
-            \\
-            \\pub fn ApiResult(comptime T: type) type {
-            \\    return union(enum) {
-            \\        ok: Owned(T),
-            \\        api_error: RawResponse,
-            \\        parse_error: ParseErrorResponse,
-            \\
-            \\        pub fn deinit(self: *@This()) void {
-            \\            switch (self.*) {
-            \\                .ok => |*value| value.deinit(),
-            \\                .api_error => |*value| value.deinit(),
-            \\                .parse_error => |*value| value.raw.deinit(),
-            \\            }
-            \\        }
-            \\    };
-            \\}
-            \\
-        );
+        try self.buffer.appendSlice(self.allocator, runtime_types);
         try self.generateHttpObserverType();
     }
 

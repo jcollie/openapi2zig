@@ -2,8 +2,12 @@ const std = @import("std");
 const types = @import("types.zig");
 const usage = @import("usage.zig");
 const fnames = @import("file_names.zig");
+const sdk_helpers = @import("sdk.zig");
+const model_names = @import("../generators/unified/model_names.zig");
 const ResourceWrapperMode = types.ResourceWrapperMode;
 const MultipleClientsMode = types.MultipleClientsMode;
+const OperationNameMode = types.OperationNameMode;
+const OperationNameOverride = types.OperationNameOverride;
 const FileKind = types.FileKind;
 const FileNameOverrides = types.FileNameOverrides;
 const CliArgs = types.CliArgs;
@@ -41,7 +45,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
         }
     }
 
-    const min_args: usize = if (has_runtime_only) 3 else 4;
+    var has_sdk = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--sdk")) has_sdk = true;
+    }
+
+    const min_args: usize = if (has_runtime_only or has_sdk) 3 else 4;
     if (args.len < min_args or (args.len >= 1 and !std.mem.eql(u8, args[1], "generate"))) {
         printUsage();
         return .{
@@ -67,7 +76,23 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var force = false;
     var runtime_only = false;
     var parameters_as_struct = false;
+    var doc_comments = false;
+    var operation_info = false;
+    var params_suffix: ?[]const u8 = null;
+    var operation_names: ?OperationNameMode = null;
+    var name_overrides_list = std.ArrayList(OperationNameOverride).empty;
+    defer name_overrides_list.deinit(allocator);
+    var name_overrides: []const OperationNameOverride = &.{};
+    var name_overrides_owned = false;
     var generate_enums = false;
+    var model_naming: model_names.Mode = .raw;
+    var pagination = false;
+    var typed_errors = false;
+    var split_by_tag = false;
+    var string_enums = false;
+    var sdk = false;
+    var sdk_config_path: ?[]const u8 = null;
+    var sdk_name: ?[]const u8 = null;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -203,12 +228,164 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             runtime_only = true;
         } else if (std.mem.eql(u8, arg, "--parameters-as-struct")) {
             parameters_as_struct = true;
+        } else if (std.mem.eql(u8, arg, "--doc-comments")) {
+            doc_comments = true;
+        } else if (std.mem.eql(u8, arg, "--operation-info")) {
+            operation_info = true;
+        } else if (std.mem.eql(u8, arg, "--params-suffix")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--params-suffix value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (params_suffix != null) {
+                printUsage();
+                printError("duplicate --params-suffix\n", .{});
+                return error.InvalidArguments;
+            }
+            if (!isIdentifierSuffix(args[i])) {
+                printUsage();
+                printError("invalid --params-suffix '{s}', expected letters, digits and underscores\n", .{args[i]});
+                return error.InvalidArguments;
+            }
+            params_suffix = args[i];
+        } else if (std.mem.eql(u8, arg, "--operation-name")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--operation-name value required\n", .{});
+                return error.InvalidArguments;
+            }
+            const value = args[i];
+            const eq = std.mem.indexOfScalar(u8, value, '=') orelse 0;
+            const name = if (eq == 0) "" else value[eq + 1 ..];
+            if (eq == 0 or !isIdentifierSuffix(name) or std.ascii.isDigit(name[0])) {
+                printUsage();
+                printError("invalid --operation-name '{s}', expected <operationId>=<identifier>\n", .{value});
+                return error.InvalidArguments;
+            }
+            for (name_overrides_list.items) |existing| {
+                if (std.mem.eql(u8, existing.operation_id, value[0..eq])) {
+                    printUsage();
+                    printError("duplicate --operation-name for '{s}'\n", .{value[0..eq]});
+                    return error.InvalidArguments;
+                }
+            }
+            try name_overrides_list.append(allocator, .{ .operation_id = value[0..eq], .name = name });
+        } else if (std.mem.eql(u8, arg, "--operation-names")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--operation-names value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (operation_names != null) {
+                printUsage();
+                printError("duplicate --operation-names\n", .{});
+                return error.InvalidArguments;
+            }
+            operation_names = parseOperationNameMode(args[i]) orelse {
+                printUsage();
+                printError("invalid --operation-names mode '{s}', expected preserve or camel-case\n", .{args[i]});
+                return error.InvalidArguments;
+            };
         } else if (std.mem.eql(u8, arg, "--enums")) {
             generate_enums = true;
+        } else if (std.mem.eql(u8, arg, "--pagination")) {
+            pagination = true;
+        } else if (std.mem.eql(u8, arg, "--string-enums")) {
+            string_enums = true;
+        } else if (std.mem.eql(u8, arg, "--split-by-tag")) {
+            split_by_tag = true;
+        } else if (std.mem.eql(u8, arg, "--typed-errors")) {
+            typed_errors = true;
+        } else if (std.mem.eql(u8, arg, "--model-naming")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--model-naming value required\n", .{});
+                return error.InvalidArguments;
+            }
+            model_naming = model_names.Mode.fromString(args[i]) orelse {
+                printUsage();
+                printError("invalid --model-naming '{s}', expected raw or namespaced\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--sdk")) {
+            sdk = true;
+        } else if (std.mem.eql(u8, arg, "--sdk-config")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--sdk-config value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (std.mem.startsWith(u8, args[i], "-")) {
+                printUsage();
+                printError("--sdk-config value must not start with '-'\n", .{});
+                return error.InvalidArguments;
+            }
+            sdk_config_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--sdk-name")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--sdk-name value required\n", .{});
+                return error.InvalidArguments;
+            }
+            sdk_name = args[i];
         }
     }
 
-    if (input_path == null and !runtime_only) {
+    if (!sdk and (sdk_config_path != null or sdk_name != null)) {
+        printUsage();
+        printError("--sdk-config and --sdk-name require --sdk\n", .{});
+        return error.InvalidArguments;
+    }
+
+    if (sdk) {
+        if (runtime_only or models_only or runtime_module != null or file_names.any()) {
+            printUsage();
+            printError("--sdk cannot be combined with --runtime-only, --models-only, --runtime-module or --file-name\n", .{});
+            return error.InvalidArguments;
+        }
+        if (multiple_clients != null) {
+            printUsage();
+            printError("--multiple-clients is not available with --sdk\n", .{});
+            return error.InvalidArguments;
+        }
+        if (resource_wrappers_explicit or tags_list.items.len > 0) {
+            // These come from the "generator" section of openapi2zig.json, so a
+            // command line value would be silently replaced.
+            printUsage();
+            printError("--sdk takes --resource-wrappers and --tag from openapi2zig.json (generator section)\n", .{});
+            return error.InvalidArguments;
+        }
+        if (sdk_name) |name| {
+            if (!sdk_helpers.isValidSdkName(name)) {
+                printUsage();
+                printError("invalid --sdk-name '{s}', expected a lowercase Zig identifier\n", .{name});
+                return error.InvalidArguments;
+            }
+        }
+        multiple_files = true;
+    }
+
+    if (split_by_tag) {
+        if (!multiple_files) {
+            printUsage();
+            printError("--split-by-tag requires --multiple-files\n", .{});
+            return error.InvalidArguments;
+        }
+        if (multiple_clients != null or models_only or runtime_module != null or file_names.any()) {
+            printUsage();
+            printError("--split-by-tag cannot be combined with --multiple-clients, --models-only, --runtime-module or --file-name\n", .{});
+            return error.InvalidArguments;
+        }
+    }
+
+    if (input_path == null and !runtime_only and !sdk) {
         printUsage();
         printError("OpenAPI spec path or URL required\n", .{});
         return error.InvalidArguments;
@@ -247,6 +424,31 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             printError("--parameters-as-struct has no effect with --runtime-only\n", .{});
             return error.InvalidArguments;
         }
+        if (doc_comments) {
+            printUsage();
+            printError("--doc-comments has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (operation_info) {
+            printUsage();
+            printError("--operation-info has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (params_suffix != null) {
+            printUsage();
+            printError("--params-suffix has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (operation_names != null) {
+            printUsage();
+            printError("--operation-names has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
+        if (name_overrides_list.items.len > 0) {
+            printUsage();
+            printError("--operation-name has no effect with --runtime-only\n", .{});
+            return error.InvalidArguments;
+        }
         if (resource_wrappers_explicit) {
             printUsage();
             printError("--resource-wrappers has no effect with --runtime-only\n", .{});
@@ -268,6 +470,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     if (runtime_module != null and !multiple_files) {
         printUsage();
         printError("--runtime-module requires --multiple-files\n", .{});
+        return error.InvalidArguments;
+    }
+
+    if (params_suffix != null and !parameters_as_struct and !runtime_only) {
+        printUsage();
+        printError("--params-suffix requires --parameters-as-struct\n", .{});
         return error.InvalidArguments;
     }
 
@@ -376,6 +584,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     }
     errdefer if (tags_owned) allocator.free(tags);
 
+    if (name_overrides_list.items.len > 0) {
+        name_overrides = try name_overrides_list.toOwnedSlice(allocator);
+        name_overrides_owned = true;
+    }
+    errdefer if (name_overrides_owned) allocator.free(name_overrides);
+
     return .{
         .args = .{
             .input_path = input_path orelse "",
@@ -392,7 +606,21 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .force = force,
             .runtime_only = runtime_only,
             .parameters_as_struct = parameters_as_struct,
+            .params_suffix = params_suffix orelse "Options",
+            .operation_names = operation_names orelse .preserve,
+            .operation_name_overrides = name_overrides,
+            .owns_operation_name_overrides = name_overrides_owned,
             .generate_enums = generate_enums,
+            .doc_comments = doc_comments,
+            .operation_info = operation_info,
+            .model_naming = model_naming,
+            .pagination = pagination,
+            .typed_errors = typed_errors,
+            .split_by_tag = split_by_tag,
+            .string_enums = string_enums,
+            .sdk = sdk,
+            .sdk_config_path = sdk_config_path,
+            .sdk_name = sdk_name,
         },
     };
 }
@@ -422,4 +650,31 @@ pub fn parseMultipleClientsMode(value: []const u8) ?MultipleClientsMode {
     if (std.mem.eql(u8, key, "pertag")) return .per_tag;
     if (std.mem.eql(u8, key, "perendpoint")) return .per_endpoint;
     return null;
+}
+
+/// Parse an --operation-names mode value, ignoring case and treating '-' and
+/// '_' alike, so camel-case, camel_case and CamelCase all resolve.
+pub fn parseOperationNameMode(value: []const u8) ?OperationNameMode {
+    var buf: [64]u8 = undefined;
+    if (value.len == 0 or value.len > buf.len) return null;
+    var n: usize = 0;
+    for (value) |c| {
+        const lower = std.ascii.toLower(c);
+        if (lower == '-' or lower == '_') continue;
+        buf[n] = lower;
+        n += 1;
+    }
+    const key = buf[0..n];
+    if (std.mem.eql(u8, key, "preserve")) return .preserve;
+    if (std.mem.eql(u8, key, "camelcase")) return .camel_case;
+    return null;
+}
+
+/// Whether `value` can follow an identifier and leave it an identifier.
+fn isIdentifierSuffix(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
 }

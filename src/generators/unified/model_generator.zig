@@ -3,6 +3,10 @@ const UnifiedDocument = @import("../../models/common/document.zig").UnifiedDocum
 const Schema = @import("../../models/common/document.zig").Schema;
 const ident = @import("ident_utils.zig");
 const enum_registry = @import("enum_registry.zig");
+const doc_comment = @import("doc_comment.zig");
+const model_names = @import("model_names.zig");
+const cycles = @import("model_generator/cycles.zig");
+const enums = @import("model_generator/enums.zig");
 
 pub fn isExtensibleRequest(name: []const u8) bool {
     return std.mem.eql(u8, name, "CreateResponse") or
@@ -15,9 +19,28 @@ pub const UnifiedModelGenerator = struct {
     source_schemas: ?*const std.StringHashMap(Schema) = null,
     /// Set by whoever drives the generator, from `--enums`.
     generate_enums: bool = false,
+    /// Write each schema's and each property's description as a doc comment.
+    doc_comments: bool = false,
     /// The document's enums as Zig types. See the note in `enum_registry` on
     /// why the API generator builds its own rather than borrowing this.
     enums: ?enum_registry.EnumRegistry = null,
+    /// How component schema names become Zig type names.
+    model_naming: model_names.Mode = .raw,
+    /// Declare named string enums as Zig enums instead of `[]const u8`.
+    string_enums: bool = false,
+    /// Built while generating when `model_naming` is `.namespaced`.
+    name_map: ?model_names.ModelNameMap = null,
+    /// `"{type name}{field name}"` keys of the reference fields that are
+    /// emitted as pointers because they close a cycle between types.
+    pointer_fields: std.StringHashMapUnmanaged(void) = .empty,
+    /// Set while one field is emitted: its reference becomes a `*const` pointer.
+    pointer_next_ref: bool = false,
+    declaration_names: std.StringHashMap(void),
+    helper_names: std.StringHashMap([]const u8),
+
+    pub const helperNameAlloc = @import("model_generator/names.zig").helperNameAlloc;
+    pub const arrayItemTypeNameAlloc = @import("model_generator/names.zig").arrayItemTypeNameAlloc;
+    pub const clearNames = @import("model_generator/names.zig").clearNames;
 
     pub const unionVariants = @import("model_generator/unions.zig").unionVariants;
     pub const isNullSchema = @import("model_generator/unions.zig").isNullSchema;
@@ -59,23 +82,35 @@ pub const UnifiedModelGenerator = struct {
     pub const generateJsonStringify = @import("model_generator/fields.zig").generateJsonStringify;
     pub const appendZigType = @import("model_generator/fields.zig").appendZigType;
     pub const appendArrayItemType = @import("model_generator/fields.zig").appendArrayItemType;
-    pub const referenceIsRecursive = @import("model_generator/fields.zig").referenceIsRecursive;
-    pub const appendRecursiveFieldType = @import("model_generator/fields.zig").appendRecursiveFieldType;
     pub const isFieldRequired = @import("model_generator/fields.zig").isFieldRequired;
 
     pub fn init(allocator: std.mem.Allocator) UnifiedModelGenerator {
         return UnifiedModelGenerator{
             .allocator = allocator,
             .buffer = std.ArrayList(u8).empty,
+            .declaration_names = std.StringHashMap(void).init(allocator),
+            .helper_names = std.StringHashMap([]const u8).init(allocator),
         };
+    }
+
+    /// A doc comment, when doc comments were asked for and there is any text.
+    pub fn appendDocComment(self: *UnifiedModelGenerator, indent: []const u8, text: ?[]const u8) !void {
+        if (!self.doc_comments) return;
+        try doc_comment.append(&self.buffer, self.allocator, indent, text orelse return);
     }
 
     pub fn deinit(self: *UnifiedModelGenerator) void {
         self.buffer.deinit(self.allocator);
+        self.clearNames();
+        self.declaration_names.deinit();
+        self.helper_names.deinit();
+        self.clearPointerFields();
+        self.pointer_fields.deinit(self.allocator);
     }
 
     pub fn generate(self: *UnifiedModelGenerator, document: UnifiedDocument) ![]const u8 {
         self.buffer.clearRetainingCapacity();
+        self.clearNames();
         try self.generateHeader();
 
         if (self.generate_enums) self.enums = try enum_registry.build(self.allocator, document);
@@ -88,11 +123,46 @@ pub const UnifiedModelGenerator = struct {
         if (document.schemas) |schemas| {
             self.source_schemas = &schemas;
             defer self.source_schemas = null;
+            if (self.model_naming == .namespaced) {
+                self.name_map = try model_names.ModelNameMap.init(self.allocator, schemas);
+            }
+            defer if (self.name_map) |*map| {
+                map.deinit();
+                self.name_map = null;
+            };
+            try cycles.collectPointerFields(self, schemas);
             try self.generateSchemas(schemas);
             try self.generateManualAliases(schemas);
+            if (self.name_map) |*map| try map.appendNamespaceAliases(self.allocator, &self.buffer);
         }
 
         return try self.allocator.dupe(u8, self.buffer.items);
+    }
+
+    pub fn clearPointerFields(self: *UnifiedModelGenerator) void {
+        var iterator = self.pointer_fields.keyIterator();
+        while (iterator.next()) |key| self.allocator.free(key.*);
+        self.pointer_fields.clearRetainingCapacity();
+    }
+
+    /// Records that `field` of the schema called `owner_raw` is a pointer.
+    pub fn markPointerField(self: *UnifiedModelGenerator, owner_raw: []const u8, field: []const u8) !void {
+        const key = try std.fmt.allocPrint(self.allocator, "{s}\x00{s}", .{ self.typeName(owner_raw), field });
+        errdefer self.allocator.free(key);
+        const gop = try self.pointer_fields.getOrPut(self.allocator, key);
+        if (gop.found_existing) self.allocator.free(key);
+    }
+
+    pub fn isPointerField(self: *const UnifiedModelGenerator, owner: []const u8, field: []const u8) bool {
+        var buffer: [512]u8 = undefined;
+        const key = std.fmt.bufPrint(&buffer, "{s}\x00{s}", .{ owner, field }) catch return false;
+        return self.pointer_fields.contains(key);
+    }
+
+    /// The Zig name of the schema called `raw` in the specification.
+    pub fn typeName(self: *const UnifiedModelGenerator, raw: []const u8) []const u8 {
+        if (self.name_map) |*map| return map.flatName(raw);
+        return raw;
     }
 
     pub fn appendIdentifier(self: *UnifiedModelGenerator, name: []const u8) !void {
@@ -112,11 +182,19 @@ pub const UnifiedModelGenerator = struct {
     }
 
     pub fn generateSchemas(self: *UnifiedModelGenerator, schemas: std.StringHashMap(Schema)) !void {
-        var schema_iterator = schemas.iterator();
-        while (schema_iterator.next()) |entry| {
-            const schema_name = entry.key_ptr.*;
-            const schema = entry.value_ptr.*;
-            try self.generateSchema(schema_name, schema);
+        // Reserve every component before emitting any inline helpers, regardless
+        // of the hash map's iteration order.
+        var names = schemas.keyIterator();
+        while (names.next()) |name| try self.declaration_names.put(self.typeName(name.*), {});
+        // Emit in name order so the output does not depend on hash map order.
+        const sorted = try self.allocator.alloc([]const u8, schemas.count());
+        defer self.allocator.free(sorted);
+        var index: usize = 0;
+        var keys = schemas.keyIterator();
+        while (keys.next()) |name| : (index += 1) sorted[index] = name.*;
+        std.mem.sort([]const u8, sorted, {}, lessThanString);
+        for (sorted) |schema_name| {
+            try self.generateSchema(self.typeName(schema_name), schemas.get(schema_name).?);
         }
     }
 
@@ -129,7 +207,7 @@ pub const UnifiedModelGenerator = struct {
     /// order independent, so the target need not come first.
     pub fn generateReferenceAlias(self: *UnifiedModelGenerator, name: []const u8, schema: Schema) !void {
         const ref = schema.ref orelse return;
-        const target = UnifiedModelGenerator.refName(ref);
+        const target = self.typeName(UnifiedModelGenerator.refName(ref));
         // `pub const X = X;` does not compile, and a component naming itself
         // says nothing worth emitting.
         if (std.mem.eql(u8, target, name)) return;
@@ -140,8 +218,28 @@ pub const UnifiedModelGenerator = struct {
         try self.buffer.appendSlice(self.allocator, ";\n\n");
     }
 
+    fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.lessThan(u8, a, b);
+    }
+
     pub fn generateSchema(self: *UnifiedModelGenerator, name: []const u8, schema: Schema) anyerror!void {
+        // Closed Zig structs cannot retain unknown keys. Keep already-lossless
+        // free-form models unchanged, but do not drop keys on open typed objects.
+        if (@import("model_generator/unions.zig").requiresLosslessComposition(schema) or
+            (schema.additional_properties == true and schema.properties != null and schema.properties.?.count() > 0 and !isExtensibleRequest(name)))
+        {
+            try self.buffer.appendSlice(self.allocator, "pub const ");
+            try self.appendIdentifier(name);
+            try self.buffer.appendSlice(self.allocator, " = std.json.Value;\n\n");
+            return;
+        }
         if (try self.generateManualSchema(name, schema)) return;
+        if (self.string_enums) {
+            if (enums.enumMembers(schema)) |members| {
+                try enums.generateStringEnum(self, name, members);
+                return;
+            }
+        }
         if (schema.type == .reference) {
             try self.generateReferenceAlias(name, schema);
             return;
@@ -159,6 +257,7 @@ pub const UnifiedModelGenerator = struct {
         if (schema.properties) |properties| {
             if (properties.count() > 0) {
                 try self.generateFieldHelpers(name, properties);
+                try self.appendDocComment("", schema.description orelse schema.title);
                 try self.buffer.appendSlice(self.allocator, "pub const ");
                 try self.appendIdentifier(name);
                 try self.buffer.appendSlice(self.allocator, " = struct {\n");
@@ -188,11 +287,11 @@ pub const UnifiedModelGenerator = struct {
                     try self.buffer.appendSlice(self.allocator, "pub const ");
                     try self.appendIdentifier(name);
                     try self.buffer.appendSlice(self.allocator, " = []const ");
-                    try self.appendIdentifier(refName(ref));
+                    try self.appendIdentifier(self.typeName(refName(ref)));
                     try self.buffer.appendSlice(self.allocator, ";\n\n");
                     return;
                 } else if (try self.canGenerateNamedArrayItemType(items.*)) {
-                    const item_type_name = try std.fmt.allocPrint(self.allocator, "{s}Item", .{name});
+                    const item_type_name = try self.arrayItemTypeNameAlloc(name);
                     defer self.allocator.free(item_type_name);
                     try self.generateSchema(item_type_name, items.*);
                     try self.buffer.appendSlice(self.allocator, "pub const ");

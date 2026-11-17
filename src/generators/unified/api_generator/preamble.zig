@@ -2,6 +2,7 @@ const std = @import("std");
 const helpers = @import("helpers.zig");
 const escapeZigString = helpers.escapeZigString;
 const UnifiedApiGenerator = @import("../api_generator.zig").UnifiedApiGenerator;
+const runtime_types = @import("../runtime_types.zig").runtime_types;
 
 pub fn generateHeader(self: *UnifiedApiGenerator) !void {
     try self.generateRuntimePreamble();
@@ -30,57 +31,7 @@ pub fn generateHeaderMulti(self: *UnifiedApiGenerator) !void {
 }
 
 pub fn generateRuntimePreamble(self: *UnifiedApiGenerator) !void {
-    try self.buffer.appendSlice(self.allocator,
-        \\
-        \\pub fn Owned(comptime T: type) type {
-        \\    return struct {
-        \\        allocator: std.mem.Allocator,
-        \\        body: []u8,
-        \\        parsed: std.json.Parsed(T),
-        \\
-        \\        pub fn deinit(self: *@This()) void {
-        \\            self.parsed.deinit();
-        \\            self.allocator.free(self.body);
-        \\        }
-        \\
-        \\        pub fn value(self: *@This()) *T {
-        \\            return &self.parsed.value;
-        \\        }
-        \\    };
-        \\}
-        \\
-        \\pub const RawResponse = struct {
-        \\    allocator: std.mem.Allocator,
-        \\    status: std.http.Status,
-        \\    body: []u8,
-        \\
-        \\    pub fn deinit(self: *@This()) void {
-        \\        self.allocator.free(self.body);
-        \\    }
-        \\};
-        \\
-        \\pub const ParseErrorResponse = struct {
-        \\    raw: RawResponse,
-        \\    error_name: []const u8,
-        \\};
-        \\
-        \\pub fn ApiResult(comptime T: type) type {
-        \\    return union(enum) {
-        \\        ok: Owned(T),
-        \\        api_error: RawResponse,
-        \\        parse_error: ParseErrorResponse,
-        \\
-        \\        pub fn deinit(self: *@This()) void {
-        \\            switch (self.*) {
-        \\                .ok => |*value| value.deinit(),
-        \\                .api_error => |*value| value.deinit(),
-        \\                .parse_error => |*value| value.raw.deinit(),
-        \\            }
-        \\        }
-        \\    };
-        \\}
-        \\
-    );
+    try self.buffer.appendSlice(self.allocator, "\n" ++ runtime_types);
     try self.generateHttpObserverType();
 }
 
@@ -90,6 +41,8 @@ pub fn generateRuntimeReexports(self: *UnifiedApiGenerator) !void {
         \\const Owned = {s}.Owned;
         \\const HttpObserver = {s}.HttpObserver;
         \\const RawResponse = {s}.RawResponse;
+        \\const FormFile = {s}.FormFile;
+        \\const Multipart = {s}.Multipart;
         \\const ParseErrorResponse = {s}.ParseErrorResponse;
         \\const ApiResult = {s}.ApiResult;
         \\const CancellationToken = {s}.CancellationToken;
@@ -101,13 +54,63 @@ pub fn generateRuntimeReexports(self: *UnifiedApiGenerator) !void {
         \\const parseSseReaderTyped = {s}.parseSseReaderTyped;
         \\const TypedSseCallback = {s}.TypedSseCallback;
         \\
-    , .{ alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias });
+    , .{ alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias, alias });
     defer self.allocator.free(exports);
     try self.buffer.appendSlice(self.allocator, exports);
 }
 
 pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
     try self.buffer.appendSlice(self.allocator,
+        \\
+        \\/// Supplies the bearer token for each request, for example one that refreshes
+        \\/// itself before it expires. The returned slice is allocated with the given
+        \\/// allocator and belongs to the caller, who frees it.
+        \\pub const TokenProvider = struct {
+        \\    ctx: *anyopaque,
+        \\    getTokenFn: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, io: std.Io) anyerror![]const u8,
+        \\
+        \\    pub fn getToken(self: TokenProvider, allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+        \\        return self.getTokenFn(self.ctx, allocator, io);
+        \\    }
+        \\};
+        \\
+        \\/// The bearer token of one request: the provider's (owned by the request) or
+        \\/// the client's static key.
+        \\pub const RequestToken = struct {
+        \\    value: []const u8,
+        \\    owned: bool,
+        \\
+        \\    pub fn deinit(self: RequestToken, allocator: std.mem.Allocator) void {
+        \\        if (self.owned) allocator.free(self.value);
+        \\    }
+        \\};
+        \\
+        \\pub fn requestToken(client: *Client, allocator: std.mem.Allocator) !RequestToken {
+        \\    if (client.token_provider) |provider| {
+        \\        return .{ .value = try provider.getToken(allocator, client.io), .owned = true };
+        \\    }
+        \\    return .{ .value = client.api_key, .owned = false };
+        \\}
+        \\
+        \\/// How throttled (429) and temporarily unavailable (503, 504) responses are
+        \\/// retried. The default of zero retries sends every request once.
+        \\pub const RetryPolicy = struct {
+        \\    max_retries: u8 = 0,
+        \\    base_delay_ms: u32 = 500,
+        \\    max_delay_ms: u32 = 30_000,
+        \\
+        \\    /// The wait before retry number `attempt` (1-based): the server's
+        \\    /// `Retry-After` when present, otherwise exponential backoff. Capped at
+        \\    /// `max_delay_ms`.
+        \\    pub fn delayMilliseconds(self: RetryPolicy, attempt: u8, retry_after_seconds: ?u32) i64 {
+        \\        if (retry_after_seconds) |seconds| {
+        \\            return @min(@as(i64, seconds) * 1000, @as(i64, self.max_delay_ms));
+        \\        }
+        \\        const shift: u5 = @intCast(@min(attempt -| 1, 20));
+        \\        const backoff = @as(i64, self.base_delay_ms) << shift;
+        \\        return @min(backoff, @as(i64, self.max_delay_ms));
+        \\    }
+        \\};
         \\
         \\pub const Client = struct {
         \\    allocator: std.mem.Allocator,
@@ -123,6 +126,9 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    project: ?[]const u8 = null,
         \\    default_headers: []const std.http.Header = &.{},
         \\    http_observer: ?HttpObserver = null,
+        \\    /// When set, the bearer token comes from the provider instead of `api_key`.
+        \\    token_provider: ?TokenProvider = null,
+        \\    retry: RetryPolicy = .{},
         \\
         \\    /// Optional predicate polled while reading a streaming response body.
         \\    /// When it returns true, a successfully started background watcher interrupts
@@ -166,6 +172,15 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\fn writeQueryComponent(writer: *std.Io.Writer, value: []const u8) !void {
         \\    try std.Uri.Component.percentEncode(writer, value, isQueryChar);
         \\}
+        \\
+        \\/// A path parameter value, percent-encoded when formatted with `{f}`.
+        \\const OpenApiPathSegment = struct {
+        \\    value: []const u8,
+        \\
+        \\    pub fn format(self: OpenApiPathSegment, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        \\        try writeQueryComponent(writer, self.value);
+        \\    }
+        \\};
         \\
         \\fn writeQueryValue(writer: *std.Io.Writer, value: anytype) !void {
         \\    const T = @TypeOf(value);
@@ -249,6 +264,261 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    try headers.append(allocator, .{ .name = name, .value = value });
         \\}
         \\
+        \\/// What `fetchFollowingRedirects` hands back: the status, the headers
+        \\/// copied out of the connection's buffer, which `deinit` frees, and the
+        \\/// `Retry-After` header as a number of seconds, when the server sent one.
+        \\const HttpFetchResult = struct {
+        \\    status: std.http.Status,
+        \\    headers: []std.http.Header,
+        \\    header_storage: []u8,
+        \\    retry_after_seconds: ?u32 = null,
+        \\
+        \\    pub fn deinit(self: HttpFetchResult, allocator: std.mem.Allocator) void {
+        \\        allocator.free(self.headers);
+        \\        allocator.free(self.header_storage);
+        \\    }
+        \\};
+        \\
+        \\fn retryAfterSeconds(io: std.Io, head: *const std.http.Client.Response.Head) ?u32 {
+        \\    var iterator = head.iterateHeaders();
+        \\    while (iterator.next()) |header| {
+        \\        if (std.ascii.eqlIgnoreCase(header.name, "retry-after")) {
+        \\            const value = std.mem.trim(u8, header.value, " ");
+        \\            if (std.fmt.parseInt(u32, value, 10)) |seconds| return seconds else |_| {}
+        \\            // The header may also be an HTTP date such as `Sun, 06 Nov 1994 08:49:37 GMT`.
+        \\            const target = parseHttpDate(value) orelse return null;
+        \\            const now = std.Io.Clock.real.now(io).toSeconds();
+        \\            return @intCast(std.math.clamp(target - now, 0, std.math.maxInt(u32)));
+        \\        }
+        \\    }
+        \\    return null;
+        \\}
+        \\
+        \\/// Seconds since the Unix epoch for an IMF-fixdate, or null when `text` is not one.
+        \\fn parseHttpDate(text: []const u8) ?i64 {
+        \\    var parts = std.mem.tokenizeAny(u8, text, " ,");
+        \\    _ = parts.next() orelse return null; // weekday
+        \\    const day = std.fmt.parseInt(i64, parts.next() orelse return null, 10) catch return null;
+        \\    const month_name = parts.next() orelse return null;
+        \\    const year = std.fmt.parseInt(i64, parts.next() orelse return null, 10) catch return null;
+        \\    const clock = parts.next() orelse return null;
+        \\    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+        \\    var month: i64 = 0;
+        \\    for (months, 1..) |name, number| {
+        \\        if (std.ascii.eqlIgnoreCase(name, month_name)) month = @intCast(number);
+        \\    }
+        \\    if (month == 0 or day < 1 or day > 31) return null;
+        \\    var clock_parts = std.mem.splitScalar(u8, clock, ':');
+        \\    const hour = std.fmt.parseInt(i64, clock_parts.next() orelse return null, 10) catch return null;
+        \\    const minute = std.fmt.parseInt(i64, clock_parts.next() orelse return null, 10) catch return null;
+        \\    const second = std.fmt.parseInt(i64, clock_parts.next() orelse return null, 10) catch return null;
+        \\    // Days since 1970-01-01 for a proleptic Gregorian date.
+        \\    const y = if (month <= 2) year - 1 else year;
+        \\    const era = @divFloor(y, 400);
+        \\    const year_of_era = y - era * 400;
+        \\    const day_of_year = @divFloor(153 * (month + (if (month > 2) @as(i64, -3) else 9)) + 2, 5) + day - 1;
+        \\    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
+        \\    const days = era * 146097 + day_of_era - 719468;
+        \\    return days * 86400 + hour * 3600 + minute * 60 + second;
+        \\}
+        \\
+        \\/// 429 and 503 mean the server did not act on the request, so any method may be
+        \\/// retried. A 504 can arrive after the work was done, so only methods that are
+        \\/// safe to repeat (everything except POST and PATCH) are retried on it.
+        \\fn isRetryableStatus(status: std.http.Status, method: std.http.Method) bool {
+        \\    if (status == .too_many_requests or status == .service_unavailable) return true;
+        \\    return status == .gateway_timeout and method != .POST and method != .PATCH;
+        \\}
+        \\
+        \\/// Sends the request, retrying throttled or temporarily unavailable responses
+        \\/// as configured by `client.retry`. Each attempt buffers its own body so a
+        \\/// discarded response never reaches `response_writer`.
+        \\fn fetchFollowingRedirects(client: *Client, method: std.http.Method, uri: std.Uri, headers: []const std.http.Header, payload: ?[]const u8, response_writer: ?*std.Io.Writer) !HttpFetchResult {
+        \\    if (client.retry.max_retries == 0) return fetchOnce(client, method, uri, headers, payload, response_writer);
+        \\    var attempt: u8 = 0;
+        \\    while (true) {
+        \\        var attempt_body: std.Io.Writer.Allocating = .init(client.allocator);
+        \\        defer attempt_body.deinit();
+        \\        const result = try fetchOnce(client, method, uri, headers, payload, if (response_writer != null) &attempt_body.writer else null);
+        \\        if (attempt < client.retry.max_retries and isRetryableStatus(result.status, method)) {
+        \\            result.deinit(client.allocator);
+        \\            attempt += 1;
+        \\            if (client.cancel_check) |is_cancelled| {
+        \\                if (is_cancelled()) return error.Cancelled;
+        \\            }
+        \\            try client.io.sleep(.fromMilliseconds(client.retry.delayMilliseconds(attempt, result.retry_after_seconds)), .awake);
+        \\            continue;
+        \\        }
+        \\        errdefer result.deinit(client.allocator);
+        \\        if (response_writer) |writer| try writer.writeAll(attempt_body.written());
+        \\        return result;
+        \\    }
+        \\}
+        \\
+        \\/// One request, following up to three redirects when it has no body. The
+        \\/// caller's headers, credentials among them, are dropped when a redirect
+        \\/// leaves the original origin, since std.http.Client would keep them.
+        \\fn fetchOnce(client: *Client, method: std.http.Method, uri: std.Uri, headers: []const std.http.Header, payload: ?[]const u8, response_writer: ?*std.Io.Writer) !HttpFetchResult {
+        \\    const allocator = client.allocator;
+        \\    var location_storage: [8 * 1024]u8 = undefined;
+        \\    var location_buffer: []u8 = &location_storage;
+        \\    var current_uri = uri;
+        \\    var current_method = method;
+        \\    var current_headers = headers;
+        \\    var remaining_redirects: u8 = 3;
+        \\    while (true) {
+        \\        // `std.http.Client` sends a body only with a method that it expects
+        \\        // to carry one, and asserts otherwise. HTTP allows one on any
+        \\        // method, and some APIs need it -- a DELETE that says what to
+        \\        // delete -- so such a body goes out after a head that declares its
+        \\        // length among the extra headers.
+        \\        const unexpected_body = payload != null and !current_method.requestHasBody();
+        \\        var length_text: [24]u8 = undefined;
+        \\        const extra_headers = if (unexpected_body) blk: {
+        \\            const with_length = try allocator.alloc(std.http.Header, current_headers.len + 1);
+        \\            @memcpy(with_length[0..current_headers.len], current_headers);
+        \\            with_length[current_headers.len] = .{
+        \\                .name = "content-length",
+        \\                .value = std.fmt.bufPrint(&length_text, "{d}", .{payload.?.len}) catch unreachable,
+        \\            };
+        \\            break :blk with_length;
+        \\        } else current_headers;
+        \\        defer if (unexpected_body) allocator.free(extra_headers);
+        \\
+        \\        var req = try client.http.request(current_method, current_uri, .{ .redirect_behavior = .unhandled, .extra_headers = extra_headers });
+        \\        defer req.deinit();
+        \\        if (payload) |body| {
+        \\            if (unexpected_body) {
+        \\                try req.sendBodilessUnflushed();
+        \\                try req.connection.?.writer().writeAll(body);
+        \\                try req.connection.?.flush();
+        \\            } else {
+        \\                req.transfer_encoding = .{ .content_length = body.len };
+        \\                var body_writer = try req.sendBodyUnflushed(&.{});
+        \\                try body_writer.writer.writeAll(body);
+        \\                try body_writer.end();
+        \\                try req.connection.?.flush();
+        \\            }
+        \\        } else if (current_method.requestHasBody()) {
+        \\            // An empty body, still framed, as a POST or PUT has to be.
+        \\            req.transfer_encoding = .{ .content_length = 0 };
+        \\            var body_writer = try req.sendBodyUnflushed(&.{});
+        \\            try body_writer.end();
+        \\            try req.connection.?.flush();
+        \\        } else {
+        \\            try req.sendBodiless();
+        \\        }
+        \\        var response = try req.receiveHead(&.{});
+        \\        const status = response.head.status;
+        \\        const location = if (payload != null) null else switch (status) {
+        \\            .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => response.head.location,
+        \\            else => null,
+        \\        };
+        \\        if (location) |target| {
+        \\            if (remaining_redirects == 0) return error.TooManyHttpRedirects;
+        \\            remaining_redirects -= 1;
+        \\            if (target.len > location_buffer.len) return error.HttpRedirectLocationOversize;
+        \\            @memcpy(location_buffer[0..target.len], target);
+        \\            const next_uri = try current_uri.resolveInPlace(target.len, &location_buffer);
+        \\            if (!isSameOrigin(current_uri, next_uri)) current_headers = &.{};
+        \\            if (current_method != .HEAD and status == .see_other or (current_method == .POST and status != .temporary_redirect and status != .permanent_redirect)) current_method = .GET;
+        \\            current_uri = next_uri;
+        \\            continue;
+        \\        }
+        \\
+        \\        // The headers live in the connection's buffer only until the body
+        \\        // is read, so they are copied out before it is.
+        \\        var count: usize = 0;
+        \\        var size: usize = 0;
+        \\        var it = response.head.iterateHeaders();
+        \\        while (it.next()) |h| {
+        \\            count += 1;
+        \\            size += h.name.len + h.value.len;
+        \\        }
+        \\        const response_headers = try allocator.alloc(std.http.Header, count);
+        \\        errdefer allocator.free(response_headers);
+        \\        const header_storage = try allocator.alloc(u8, size);
+        \\        errdefer allocator.free(header_storage);
+        \\        var offset: usize = 0;
+        \\        it = response.head.iterateHeaders();
+        \\        for (response_headers) |*h| {
+        \\            const next = it.next().?;
+        \\            @memcpy(header_storage[offset..][0..next.name.len], next.name);
+        \\            h.name = header_storage[offset..][0..next.name.len];
+        \\            offset += next.name.len;
+        \\            @memcpy(header_storage[offset..][0..next.value.len], next.value);
+        \\            h.value = header_storage[offset..][0..next.value.len];
+        \\            offset += next.value.len;
+        \\        }
+        \\        const result: HttpFetchResult = .{
+        \\            .status = status,
+        \\            .headers = response_headers,
+        \\            .header_storage = header_storage,
+        \\            .retry_after_seconds = retryAfterSeconds(client.io, &response.head),
+        \\        };
+        \\
+        \\        // A 1xx, 204 or 304 response ends with its headers whatever they
+        \\        // say. `receiveHead` knows that, but `Response.reader`, and
+        \\        // `Request.deinit` draining what is left so the connection can be
+        \\        // reused, ask only whether the method can have a body: for a 204
+        \\        // with no `Content-Length` both read on, waiting for a close that a
+        \\        // kept-alive connection never sends. Such a response is not read.
+        \\        // A 204 or 304 is marked finished, so the connection is reused;
+        \\        // anything else bodiless closes it rather than draining it.
+        \\        const has_body = current_method.responseHasBody() and status.class() != .informational and
+        \\            status != .no_content and status != .not_modified;
+        \\        if (!has_body) {
+        \\            if (status == .no_content or status == .not_modified) {
+        \\                req.reader.state = .ready;
+        \\            } else if (req.connection) |connection| {
+        \\                connection.closing = true;
+        \\            }
+        \\            return result;
+        \\        }
+        \\
+        \\        const writer = response_writer orelse {
+        \\            const reader = response.reader(&.{});
+        \\            _ = reader.discardRemaining() catch |err| switch (err) {
+        \\                error.ReadFailed => return response.bodyErr() orelse err,
+        \\            };
+        \\            return result;
+        \\        };
+        \\        const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        \\            .identity => &.{},
+        \\            .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        \\            .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        \\            .compress => return error.UnsupportedCompressionMethod,
+        \\        };
+        \\        defer allocator.free(decompress_buffer);
+        \\        var transfer_buffer: [64]u8 = undefined;
+        \\        var decompress: std.http.Decompress = undefined;
+        \\        const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+        \\        _ = reader.streamRemaining(writer) catch |err| switch (err) {
+        \\            error.ReadFailed => return response.bodyErr() orelse err,
+        \\            else => |e| return e,
+        \\        };
+        \\        return result;
+        \\    }
+        \\}
+        \\
+        \\/// A URI that omits its port uses the default of its scheme.
+        \\fn originPort(uri: std.Uri) ?u16 {
+        \\    if (uri.port) |port| return port;
+        \\    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return null;
+        \\    return switch (protocol) {
+        \\        .plain => 80,
+        \\        .tls => 443,
+        \\    };
+        \\}
+        \\
+        \\pub fn isSameOrigin(left: std.Uri, right: std.Uri) bool {
+        \\    var left_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        \\    var right_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        \\    const left_host = std.Io.net.HostName.fromUri(left, &left_buffer) catch return false;
+        \\    const right_host = std.Io.net.HostName.fromUri(right, &right_buffer) catch return false;
+        \\    return std.ascii.eqlIgnoreCase(left.scheme, right.scheme) and left_host.eql(right_host) and originPort(left) == originPort(right);
+        \\}
+        \\
         \\pub fn requestRaw(client: *Client, method: std.http.Method, url: []const u8, payload: ?[]const u8) !RawResponse {
         \\    return requestRawWithContentType(client, method, url, payload, "application/json");
         \\}
@@ -274,13 +544,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    defer response_body.deinit();
         \\
         \\    const start = std.Io.Clock.awake.now(client.io);
-        \\    const result = client.http.fetch(.{
-        \\        .location = .{ .uri = uri },
-        \\        .method = method,
-        \\        .extra_headers = headers.items,
-        \\        .payload = payload,
-        \\        .response_writer = &response_body.writer,
-        \\    }) catch |err| {
+        \\    const result = fetchFollowingRedirects(client, method, uri, headers.items, payload, &response_body.writer) catch |err| {
         \\        if (client.http_observer) |obs| {
         \\            if (obs.onError) |cb| cb(obs.ctx, method, url, @errorName(err));
         \\        }
@@ -288,16 +552,19 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    };
         \\    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));
         \\
+        \\    errdefer result.deinit(allocator);
         \\    const body = try response_body.toOwnedSlice();
         \\
         \\    if (client.http_observer) |obs| {
-        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, &.{}, body, elapsed_ns);
+        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, result.headers, body, elapsed_ns);
         \\    }
         \\
         \\    return .{
         \\        .allocator = allocator,
         \\        .status = result.status,
         \\        .body = body,
+        \\        .headers = result.headers,
+        \\        .header_storage = result.header_storage,
         \\    };
         \\}
         \\
@@ -317,13 +584,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    defer response_body.deinit();
         \\
         \\    const start = std.Io.Clock.awake.now(client.io);
-        \\    const result = client.http.fetch(.{
-        \\        .location = .{ .uri = uri },
-        \\        .method = method,
-        \\        .extra_headers = headers.items,
-        \\        .payload = payload,
-        \\        .response_writer = &response_body.writer,
-        \\    }) catch |err| {
+        \\    const result = fetchFollowingRedirects(client, method, uri, headers.items, payload, &response_body.writer) catch |err| {
         \\        if (client.http_observer) |obs| {
         \\            if (obs.onError) |cb| cb(obs.ctx, method, url, @errorName(err));
         \\        }
@@ -331,16 +592,19 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    };
         \\    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));
         \\
+        \\    errdefer result.deinit(allocator);
         \\    const body = try response_body.toOwnedSlice();
         \\
         \\    if (client.http_observer) |obs| {
-        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, &.{}, body, elapsed_ns);
+        \\        if (obs.onResponse) |cb| cb(obs.ctx, method, url, result.status, result.headers, body, elapsed_ns);
         \\    }
         \\
         \\    return .{
         \\        .allocator = allocator,
         \\        .status = result.status,
         \\        .body = body,
+        \\        .headers = result.headers,
+        \\        .header_storage = result.header_storage,
         \\    };
         \\}
         \\
@@ -366,7 +630,7 @@ pub fn generateClientPreamble(self: *UnifiedApiGenerator) !void {
         \\    const parsed = std.json.parseFromSlice(T, raw.allocator, raw.body, .{ .ignore_unknown_fields = true }) catch |err| {
         \\        return .{ .parse_error = .{ .raw = raw, .error_name = @errorName(err) } };
         \\    };
-        \\    return .{ .ok = .{ .allocator = raw.allocator, .body = raw.body, .parsed = parsed } };
+        \\    return .{ .ok = .{ .allocator = raw.allocator, .body = raw.body, .parsed = parsed, .headers = raw.headers, .header_storage = raw.header_storage } };
         \\}
         \\
         \\pub fn getJsonResult(comptime T: type, client: *Client, path: []const u8) !ApiResult(T) {
@@ -737,6 +1001,7 @@ pub fn generateStreamAuthCode(self: *UnifiedApiGenerator) !void {
         \\
         \\
     );
+    if (self.args.pagination) try self.generatePagerType();
 }
 
 pub fn generateSseBufferConstants(self: *UnifiedApiGenerator) !void {

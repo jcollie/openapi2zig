@@ -9,31 +9,31 @@ This is a CLI tool written in Zig that generates type-safe Zig API client code f
 ## Working Effectively
 
 ### Prerequisites and Installation
-Install Zig 0.16.0 or newer:
+Install Zig 0.17.1 or newer:
 
 **Option 1: GitHub Codespaces (RECOMMENDED for development)**
 ```bash
 # Navigate to repository on GitHub → Code → Codespaces → Create codespace
-# Everything is pre-configured with Zig 0.16.0, takes 2-3 minutes to set up
+# Everything is pre-configured with Zig 0.17.1, takes 2-3 minutes to set up
 ```
 
 **Option 2: Dev Containers (local with Docker)**
 ```bash
 # Install VS Code + Dev Containers extension
 # Open project in VS Code → "Reopen in Container"
-# Uses .devcontainer/devcontainer.json with Zig 0.16.0
+# Uses .devcontainer/devcontainer.json with Zig 0.17.1
 ```
 
 **Option 3: Manual Installation**
 ```bash
-# Download Zig 0.16.0 from https://ziglang.org/download/0.16.0/
+# Download Zig 0.17.1 from https://ziglang.org/download/0.17.1/
 # Linux x86_64:
-wget https://ziglang.org/download/0.16.0/zig-linux-x86_64-0.16.0.tar.xz
-tar -xf zig-linux-x86_64-0.16.0.tar.xz
-export PATH="$PWD/zig-linux-x86_64-0.16.0:$PATH"
+wget https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+tar -xf zig-x86_64-linux-0.17.1.tar.xz
+export PATH="$PWD/zig-x86_64-linux-0.17.1:$PATH"
 
 # Verify installation
-zig version  # Must output "0.16.0" or newer
+zig version  # Must output "0.17.1" or newer
 ```
 
 ### Bootstrap, Build, and Test the Repository
@@ -80,7 +80,8 @@ zig run generated/main.zig  # Test generated code, should output "Generated mode
 zig run /tmp/test_output.zig  # Verify custom generated code works
 
 # Cross-compilation validation (1-2 minutes each)
-zig build -Dtarget=x86_64-windows   # Windows x64
+zig build -Dtarget=x86_64-windows-gnu   # Windows x64
+zig build -Dtarget=aarch64-windows-gnu  # Windows ARM64
 zig build -Dtarget=x86_64-macos     # macOS x64  
 zig build -Dtarget=aarch64-linux    # Linux ARM64
 ```
@@ -295,7 +296,8 @@ Use Zig error sets and `catch |err|` pattern. Print meaningful error messages wi
   - `zig build run-generate` - Set timeout: 5+ minutes
 
 - **Cross-compilation**: 1-2 minutes per target
-  - `zig build -Dtarget=x86_64-windows` - Set timeout: 5+ minutes
+  - `zig build -Dtarget=x86_64-windows-gnu` - Set timeout: 5+ minutes
+  - `zig build -Dtarget=aarch64-windows-gnu` - Set timeout: 5+ minutes
   - `zig build -Dtarget=x86_64-macos` - Set timeout: 5+ minutes  
   - `zig build -Dtarget=aarch64-linux` - Set timeout: 5+ minutes
 
@@ -362,9 +364,9 @@ generated/
 ## Troubleshooting
 
 ### Installation Issues
-- **"zig: command not found"**: Install Zig 0.16.0 or newer using methods above
-- **Wrong Zig version**: Install Zig 0.16.0 or newer
-- **Build failures**: Ensure you're using Zig 0.16.0+; anything below 0.16.0 is unsupported
+- **"zig: command not found"**: Install Zig 0.17.1 or newer using methods above
+- **Wrong Zig version**: Install Zig 0.17.1 or newer
+- **Build failures**: Ensure you're using Zig 0.17.1+; anything below 0.17.1 is unsupported
 - **Docker issues**: Use GitHub Codespaces or dev containers instead
 
 ### Build and Test Issues  

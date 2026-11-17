@@ -1,139 +1,145 @@
 const std = @import("std");
-const testing = std.testing;
-const test_utils = @import("test_utils.zig");
 const models = @import("../models.zig");
 const OpenApiConverter = @import("../generators/converters/openapi_converter.zig").OpenApiConverter;
 const UnifiedModelGenerator = @import("../generators/unified/model_generator.zig").UnifiedModelGenerator;
+const test_utils = @import("test_utils.zig");
 
-// A definition with a field of its own type. Forgejo's `Repository` has a
-// `parent` that is another `Repository`, and generated as a plain field it is
-// a struct that contains itself, which Zig rejects outright.
-const spec_with_self_reference =
-    \\{
-    \\  "openapi": "3.0.0",
-    \\  "info": { "title": "Recursion", "version": "1.0.0" },
-    \\  "paths": {},
-    \\  "components": {
-    \\    "schemas": {
-    \\      "Repository": {
-    \\        "type": "object",
-    \\        "properties": {
-    \\          "name": { "type": "string" },
-    \\          "parent": { "$ref": "#/components/schemas/Repository" },
-    \\          "forks": {
-    \\            "type": "array",
-    \\            "items": { "$ref": "#/components/schemas/Repository" }
-    \\          }
-    \\        }
-    \\      }
-    \\    }
-    \\  }
-    \\}
-;
+const testing = std.testing;
 
-// The cycle is longer than one hop: a category holds a directory, which holds
-// the category back. Either field would do to break it; the one reached first
-// takes the pointer.
-const spec_with_indirect_cycle =
-    \\{
-    \\  "openapi": "3.0.0",
-    \\  "info": { "title": "Recursion", "version": "1.0.0" },
-    \\  "paths": {},
-    \\  "components": {
-    \\    "schemas": {
-    \\      "Category": {
-    \\        "type": "object",
-    \\        "properties": {
-    \\          "directory": { "$ref": "#/components/schemas/Directory" }
-    \\        }
-    \\      },
-    \\      "Directory": {
-    \\        "type": "object",
-    \\        "properties": {
-    \\          "category": { "$ref": "#/components/schemas/Category" }
-    \\        }
-    \\      }
-    \\    }
-    \\  }
-    \\}
-;
+const spec =
+    "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"paths\":{},\"components\":{\"schemas\":{" ++
+    "\"A\":{\"type\":\"object\",\"properties\":{\"b\":{\"$ref\":\"#/components/schemas/B\"},\"name\":{\"type\":\"string\"}}}," ++
+    "\"B\":{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"#/components/schemas/A\"},\"c\":{\"$ref\":\"#/components/schemas/C\"}}}," ++
+    "\"C\":{\"type\":\"object\",\"properties\":{\"b\":{\"anyOf\":[{\"$ref\":\"#/components/schemas/B\"},{\"type\":\"object\",\"nullable\":true}]}}}," ++
+    "\"Node\":{\"type\":\"object\",\"properties\":{\"next\":{\"$ref\":\"#/components/schemas/Node\"},\"children\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/components/schemas/Node\"}}}}" ++
+    "}}}";
 
-// Two definitions referring to a third. Nothing here is recursive, and adding
-// indirection to these would only make them harder to use.
-const spec_without_recursion =
-    \\{
-    \\  "openapi": "3.0.0",
-    \\  "info": { "title": "Recursion", "version": "1.0.0" },
-    \\  "paths": {},
-    \\  "components": {
-    \\    "schemas": {
-    \\      "Issue": {
-    \\        "type": "object",
-    \\        "properties": {
-    \\          "user": { "$ref": "#/components/schemas/User" },
-    \\          "assignee": { "$ref": "#/components/schemas/User" }
-    \\        }
-    \\      },
-    \\      "User": {
-    \\        "type": "object",
-    \\        "properties": { "login": { "type": "string" } }
-    \\      }
-    \\    }
-    \\  }
-    \\}
-;
-
-fn generateModels(allocator: std.mem.Allocator, spec: []const u8) ![]const u8 {
+fn generate(allocator: std.mem.Allocator) ![]const u8 {
     var parsed = try models.OpenApiDocument.parseFromJson(allocator, spec);
     defer parsed.deinit(allocator);
     var converter = OpenApiConverter.init(allocator);
     var unified = try converter.convert(parsed);
     defer unified.deinit(allocator);
-
     var generator = UnifiedModelGenerator.init(allocator);
     defer generator.deinit();
     return generator.generate(unified);
 }
 
-test "a field of the type it is declared in is generated behind a pointer" {
+test "fields that close a reference cycle become pointers" {
     var gpa = test_utils.createTestAllocator();
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    const code = try generateModels(allocator, spec_with_self_reference);
+    const code = try generate(allocator);
     defer allocator.free(code);
 
-    try testing.expect(std.mem.indexOf(u8, code, "parent: ?*const Repository = null,") != null);
-    // A slice already holds its elements out of line, so an array of the same
-    // type needs no pointer and should not grow one.
-    try testing.expect(std.mem.indexOf(u8, code, "forks: ?[]const Repository = null,") != null);
-    try testing.expect(std.mem.indexOf(u8, code, "name: ?[]const u8 = null,") != null);
+    // A -> B -> C -> B closes on C.b, and B -> A closes on B.a.
+    try testing.expect(std.mem.indexOf(u8, code, "a: ?*const A = null,") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "b: ?*const B = null,") != null);
+    // Tree edges and slices stay by value.
+    try testing.expect(std.mem.indexOf(u8, code, "b: ?B = null,") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "c: ?C = null,") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "children: ?[]const Node = null,") != null);
+    try testing.expect(std.mem.indexOf(u8, code, "next: ?*const Node = null,") != null);
 }
 
-test "a cycle through another definition is broken too" {
+test "pointer fields survive a json round trip" {
     var gpa = test_utils.createTestAllocator();
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    const code = try generateModels(allocator, spec_with_indirect_cycle);
+    const code = try generate(allocator);
     defer allocator.free(code);
 
-    // Whichever way round the two are emitted, at least one of the two fields
-    // has to be a pointer or neither struct has a size.
-    const category_indirect = std.mem.indexOf(u8, code, "directory: ?*const Directory = null,") != null;
-    const directory_indirect = std.mem.indexOf(u8, code, "category: ?*const Category = null,") != null;
-    try testing.expect(category_indirect or directory_indirect);
+    // The generated declarations must be valid Zig that can refer to itself.
+    const source = try allocator.dupeSentinel(u8, code, 0);
+    defer allocator.free(source);
+    var tree = try std.zig.Ast.parse(allocator, source, .{ .mode = .zig });
+    defer tree.deinit(allocator);
+    try testing.expectEqual(@as(usize, 0), tree.errors.len);
 }
 
-test "definitions that are not recursive keep their fields by value" {
+const union_cycle_spec =
+    "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"paths\":{},\"components\":{\"schemas\":{" ++
+    "\"A\":{\"type\":\"object\",\"properties\":{\"b\":{\"$ref\":\"#/components/schemas/B\"}}}," ++
+    "\"B\":{\"oneOf\":[{\"$ref\":\"#/components/schemas/A\"},{\"$ref\":\"#/components/schemas/C\"}]}," ++
+    "\"C\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}}}}";
+
+test "a cycle through a union gets its pointer on the property before the union" {
     var gpa = test_utils.createTestAllocator();
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
-    const code = try generateModels(allocator, spec_without_recursion);
+    var parsed = try models.OpenApiDocument.parseFromJson(allocator, union_cycle_spec);
+    defer parsed.deinit(allocator);
+    var converter = OpenApiConverter.init(allocator);
+    var unified = try converter.convert(parsed);
+    defer unified.deinit(allocator);
+    var generator = UnifiedModelGenerator.init(allocator);
+    defer generator.deinit();
+    const code = try generator.generate(unified);
     defer allocator.free(code);
 
-    try testing.expect(std.mem.indexOf(u8, code, "user: ?User = null,") != null);
-    try testing.expect(std.mem.indexOf(u8, code, "assignee: ?User = null,") != null);
-    try testing.expect(std.mem.indexOf(u8, code, "*const") == null);
+    // A holds a B, B may hold an A: the property A.b becomes the indirection.
+    try testing.expect(std.mem.indexOf(u8, code, "b: ?*const B = null,") != null);
+}
+
+const alias_cycle_spec =
+    "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"paths\":{},\"components\":{\"schemas\":{" ++
+    "\"A\":{\"type\":\"object\",\"properties\":{\"b\":{\"$ref\":\"#/components/schemas/B\"}}}," ++
+    "\"B\":{\"anyOf\":[{\"$ref\":\"#/components/schemas/A\"},{\"type\":\"object\",\"nullable\":true}]}}}}";
+
+test "a cycle through a component alias is broken" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    var parsed = try models.OpenApiDocument.parseFromJson(allocator, alias_cycle_spec);
+    defer parsed.deinit(allocator);
+    var converter = OpenApiConverter.init(allocator);
+    var unified = try converter.convert(parsed);
+    defer unified.deinit(allocator);
+    var generator = UnifiedModelGenerator.init(allocator);
+    defer generator.deinit();
+    const code = try generator.generate(unified);
+    defer allocator.free(code);
+
+    try testing.expect(std.mem.indexOf(u8, code, "b: ?*const B = null,") != null);
+}
+
+test "cycle cuts keep moving until every route is cut" {
+    var gpa = test_utils.createTestAllocator();
+    const allocator = gpa.allocator();
+    defer std.debug.assert(gpa.deinit() == .ok);
+
+    // A reaches the union B through 65 routes, and B can hold A again.
+    var spec_text: std.ArrayList(u8) = .empty;
+    defer spec_text.deinit(allocator);
+    try spec_text.appendSlice(allocator, "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"paths\":{},\"components\":{\"schemas\":{");
+    try spec_text.appendSlice(allocator, "\"D\":{\"type\":\"object\"},");
+    try spec_text.appendSlice(allocator, "\"B\":{\"oneOf\":[{\"$ref\":\"#/components/schemas/A\"},{\"$ref\":\"#/components/schemas/D\"}]},");
+    try spec_text.appendSlice(allocator, "\"A\":{\"type\":\"object\",\"properties\":{");
+    var i: usize = 1;
+    while (i <= 65) : (i += 1) {
+        if (i > 1) try spec_text.append(allocator, ',');
+        try spec_text.print(allocator, "\"p{d:0>2}\":{{\"$ref\":\"#/components/schemas/C{d:0>2}\"}}", .{ i, i });
+    }
+    try spec_text.appendSlice(allocator, "}}");
+    i = 1;
+    while (i <= 65) : (i += 1) {
+        try spec_text.print(allocator, ",\"C{d:0>2}\":{{\"type\":\"object\",\"properties\":{{\"b\":{{\"$ref\":\"#/components/schemas/B\"}}}}}}", .{i});
+    }
+    try spec_text.appendSlice(allocator, "}}}");
+
+    var parsed = try models.OpenApiDocument.parseFromJson(allocator, spec_text.items);
+    defer parsed.deinit(allocator);
+    var converter = OpenApiConverter.init(allocator);
+    var unified = try converter.convert(parsed);
+    defer unified.deinit(allocator);
+    var generator = UnifiedModelGenerator.init(allocator);
+    defer generator.deinit();
+    const code = try generator.generate(unified);
+    defer allocator.free(code);
+
+    try testing.expectEqual(@as(usize, 65), std.mem.count(u8, code, "b: ?*const B = null,"));
 }

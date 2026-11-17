@@ -11,16 +11,25 @@ const escapeZigString = helpers.escapeZigString;
 const bodyKindFor = helpers.bodyKindFor;
 const findBodyParam = helpers.findBodyParam;
 const hasHeaderParams = helpers.hasHeaderParams;
+const usesMultipart = helpers.usesMultipart;
 const authSchemeForOperation = helpers.authSchemeForOperation;
 const UnifiedApiGenerator = @import("../api_generator.zig").UnifiedApiGenerator;
 
 pub fn generateApiClient(self: *UnifiedApiGenerator, document: UnifiedDocument) !void {
-    var path_iterator = document.paths.iterator();
-    while (path_iterator.next()) |entry| {
-        const path = entry.key_ptr.*;
-        const path_item = entry.value_ptr.*;
-        try self.generateOperations(path, path_item, document);
+    // Emit in path order so the output does not depend on hash map order.
+    const sorted = try self.allocator.alloc([]const u8, document.paths.count());
+    defer self.allocator.free(sorted);
+    var index: usize = 0;
+    var keys = document.paths.keyIterator();
+    while (keys.next()) |path| : (index += 1) sorted[index] = path.*;
+    std.mem.sort([]const u8, sorted, {}, lessThanPath);
+    for (sorted) |path| {
+        try self.generateOperations(path, document.paths.get(path).?, document);
     }
+}
+
+fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 pub fn generateOperations(self: *UnifiedApiGenerator, path: []const u8, path_item: @import("../../../models/common/document.zig").PathItem, document: UnifiedDocument) !void {
@@ -34,15 +43,17 @@ pub fn generateOperations(self: *UnifiedApiGenerator, path: []const u8, path_ite
 }
 
 pub fn generateOperation(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation, document: UnifiedDocument) !void {
-    try self.generateComments(operation);
+    if (!self.args.doc_comments) try self.generateComments(operation);
     try self.generateOptionsType(operation, method, path, document);
+    try self.generateOperationDocComment(method, path, operation);
     try self.generateFunctionSignature(method, path, operation);
-    try self.generateFunctionBody(method, path, operation);
+    try self.generateFunctionBody(method, path, operation, document);
     if (operation.operationId != null) {
         try self.generateFunctionRaw(method, path, operation, document);
     }
     if (operation.operationId != null and self.hasReturnValue(method, operation)) {
         try self.generateFunctionResult(method, path, operation);
+        try self.generatePagesFunction(method, path, operation, document);
     }
 
     if (operation.streaming and std.mem.eql(u8, method, "POST")) {
@@ -61,6 +72,11 @@ pub fn generateFunctionResult(self: *UnifiedApiGenerator, method: []const u8, pa
     const raw_name = try std.fmt.allocPrint(self.allocator, "{s}Raw", .{operation_id});
     defer self.allocator.free(raw_name);
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// `");
+        try self.buffer.appendSlice(self.allocator, operation_id);
+        try self.buffer.appendSlice(self.allocator, "`, telling a successful response apart from an error\n/// response and from one that does not parse.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.appendIdentifier(result_name);
     try self.buffer.appendSlice(self.allocator, "(client: *Client");
@@ -84,6 +100,11 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
 
     const kind = bodyKindFor(operation);
 
+    if (self.args.doc_comments) {
+        try self.buffer.appendSlice(self.allocator, "/// `");
+        try self.buffer.appendSlice(self.allocator, operation_id);
+        try self.buffer.appendSlice(self.allocator, "`, handing back the response as it came -- its status,\n/// headers and body -- whatever the status is.\n");
+    }
     try self.buffer.appendSlice(self.allocator, "pub fn ");
     try self.appendIdentifier(raw_name);
     try self.buffer.appendSlice(self.allocator, "(client: *Client");
@@ -98,6 +119,55 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     const scheme = authSchemeForOperation(document, operation);
     const needs_auth = scheme != null;
     const needs_headers = raw_has_header_params or needs_auth;
+
+    if (usesMultipart(operation)) {
+        // One part per form field that is set, sent with the boundary the
+        // body was built around.
+        try self.buffer.appendSlice(self.allocator, "\n    var multipart: Multipart = .{};\n");
+        try self.buffer.appendSlice(self.allocator, "    defer multipart.deinit(allocator);\n");
+        if (operation.parameters) |params| {
+            for (params, 0..) |param, i| {
+                if (param.location != .form) continue;
+                const escaped = try escapeZigString(self.allocator, param.name);
+                defer self.allocator.free(escaped);
+                if (param.required) {
+                    try self.buffer.appendSlice(self.allocator, "    try multipart.add(allocator, \"");
+                    try self.buffer.appendSlice(self.allocator, escaped);
+                    try self.buffer.appendSlice(self.allocator, "\", ");
+                    try self.appendParamReference(operation, method, path, i, param);
+                    try self.buffer.appendSlice(self.allocator, ");\n");
+                } else {
+                    try self.buffer.appendSlice(self.allocator, "    if (");
+                    try self.appendParamReference(operation, method, path, i, param);
+                    try self.buffer.appendSlice(self.allocator, ") |value| try multipart.add(allocator, \"");
+                    try self.buffer.appendSlice(self.allocator, escaped);
+                    try self.buffer.appendSlice(self.allocator, "\", value);\n");
+                }
+            }
+        }
+        try self.buffer.appendSlice(self.allocator, "    const form = try multipart.finish(allocator, client.io);\n");
+        try self.buffer.appendSlice(self.allocator, "    defer form.deinit(allocator);\n");
+        try self.buffer.appendSlice(self.allocator, "    const payload: ?[]const u8 = form.body;\n");
+        if (needs_headers) {
+            try self.buffer.appendSlice(self.allocator, "\n");
+            try self.appendHeaderLocals(header_local_names);
+            try self.appendAuthHeader(scheme, header_local_names);
+            if (raw_has_header_params) {
+                try self.appendHeaderParamAppends(operation, method, path, header_local_names);
+            }
+            try self.buffer.appendSlice(self.allocator, "\n    return requestRawWithContentTypeAndExtraHeaders(client, std.http.Method.");
+            try self.buffer.appendSlice(self.allocator, method);
+            try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), payload, form.content_type, ");
+            try self.buffer.appendSlice(self.allocator, header_local_names.headers);
+            try self.buffer.appendSlice(self.allocator, ".items);\n");
+        } else {
+            try self.buffer.appendSlice(self.allocator, "\n    return requestRawWithContentType(client, std.http.Method.");
+            try self.buffer.appendSlice(self.allocator, method);
+            try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), payload, form.content_type);\n");
+        }
+        try self.buffer.appendSlice(self.allocator, "}\n\n");
+        return;
+    }
 
     switch (kind) {
         .json => {
@@ -223,17 +293,11 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     try self.buffer.appendSlice(self.allocator, "    var response_body: std.Io.Writer.Allocating = .init(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "    defer response_body.deinit();\n");
     try self.buffer.appendSlice(self.allocator, "    const start = std.Io.Clock.awake.now(client.io);\n");
-    try self.buffer.appendSlice(self.allocator, "    const result = client.http.fetch(.{\n");
-    try self.buffer.appendSlice(self.allocator, "        .location = .{ .uri = uri },\n");
-    try self.buffer.appendSlice(self.allocator, "        .method = std.http.Method.");
+    try self.buffer.appendSlice(self.allocator, "    const result = fetchFollowingRedirects(client, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ",\n");
-    try self.buffer.appendSlice(self.allocator, "        .extra_headers = ");
+    try self.buffer.appendSlice(self.allocator, ", uri, ");
     try self.buffer.appendSlice(self.allocator, header_local_names.headers);
-    try self.buffer.appendSlice(self.allocator, ".items,\n");
-    try self.buffer.appendSlice(self.allocator, "        .payload = payload,\n");
-    try self.buffer.appendSlice(self.allocator, "        .response_writer = &response_body.writer,\n");
-    try self.buffer.appendSlice(self.allocator, "    }) catch |err| {\n");
+    try self.buffer.appendSlice(self.allocator, ".items, payload, &response_body.writer) catch |err| {\n");
     try self.buffer.appendSlice(self.allocator, "        if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "            if (obs.onError) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
@@ -242,21 +306,26 @@ pub fn generateFunctionRaw(self: *UnifiedApiGenerator, method: []const u8, path:
     try self.buffer.appendSlice(self.allocator, "        return err;\n");
     try self.buffer.appendSlice(self.allocator, "    };\n");
     try self.buffer.appendSlice(self.allocator, "    const elapsed_ns = @as(u64, @intCast(start.untilNow(client.io, .awake).nanoseconds));\n");
+    try self.buffer.appendSlice(self.allocator, "    errdefer result.deinit(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "\n    const body = try response_body.toOwnedSlice();\n");
     try self.buffer.appendSlice(self.allocator, "\n    if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, body, elapsed_ns);\n");
+    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, body, elapsed_ns);\n");
     try self.buffer.appendSlice(self.allocator, "    }\n");
     try self.buffer.appendSlice(self.allocator, "\n    return .{\n");
     try self.buffer.appendSlice(self.allocator, "        .allocator = allocator,\n");
     try self.buffer.appendSlice(self.allocator, "        .status = result.status,\n");
     try self.buffer.appendSlice(self.allocator, "        .body = body,\n");
+    try self.buffer.appendSlice(self.allocator, "        .headers = result.headers,\n");
+    try self.buffer.appendSlice(self.allocator, "        .header_storage = result.header_storage,\n");
     try self.buffer.appendSlice(self.allocator, "    };\n");
     try self.buffer.appendSlice(self.allocator, "}\n\n");
 }
 
 pub fn generateStreamFunction(self: *UnifiedApiGenerator, name: []const u8, path: []const u8, operation: Operation, document: UnifiedDocument) !void {
+    const stream_parameters = @import("streaming.zig");
+    if (stream_parameters.hasParameters(operation)) return stream_parameters.generateFunction(self, name, path, operation, document);
     const scheme = authSchemeForOperation(document, operation);
     if (scheme) |s| {
         switch (s) {
@@ -268,8 +337,9 @@ pub fn generateStreamFunction(self: *UnifiedApiGenerator, name: []const u8, path
                 try self.buffer.appendSlice(self.allocator, "    defer stream_headers.deinit(client.allocator);\n");
                 try self.buffer.appendSlice(self.allocator, "    var auth_header: ?[]u8 = null;\n");
                 try self.buffer.appendSlice(self.allocator, "    defer if (auth_header) |value| client.allocator.free(value);\n");
-                try self.buffer.appendSlice(self.allocator, "    if (client.api_key.len > 0) {\n");
-                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(client.allocator, \"Bearer {s}\", .{client.api_key});\n");
+                try self.buffer.appendSlice(self.allocator, "    const bearer_holder = try requestToken(client, client.allocator);\n    defer bearer_holder.deinit(client.allocator);\n    const bearer_token = bearer_holder.value;\n");
+                try self.buffer.appendSlice(self.allocator, "    if (bearer_token.len > 0) {\n");
+                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(client.allocator, \"Bearer {s}\", .{bearer_token});\n");
                 try self.buffer.appendSlice(self.allocator, "        try stream_headers.append(client.allocator, .{ .name = \"Authorization\", .value = auth_header.? });\n");
                 try self.buffer.appendSlice(self.allocator, "    }\n");
                 try self.buffer.appendSlice(self.allocator, "    return streamJsonWithExtraHeaders(client, \"");
@@ -284,8 +354,9 @@ pub fn generateStreamFunction(self: *UnifiedApiGenerator, name: []const u8, path
                 try self.buffer.appendSlice(self.allocator, "    defer stream_headers.deinit(client.allocator);\n");
                 try self.buffer.appendSlice(self.allocator, "    var auth_header: ?[]u8 = null;\n");
                 try self.buffer.appendSlice(self.allocator, "    defer if (auth_header) |value| client.allocator.free(value);\n");
-                try self.buffer.appendSlice(self.allocator, "    if (client.api_key.len > 0) {\n");
-                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(client.allocator, \"Bearer {s}\", .{client.api_key});\n");
+                try self.buffer.appendSlice(self.allocator, "    const bearer_holder = try requestToken(client, client.allocator);\n    defer bearer_holder.deinit(client.allocator);\n    const bearer_token = bearer_holder.value;\n");
+                try self.buffer.appendSlice(self.allocator, "    if (bearer_token.len > 0) {\n");
+                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(client.allocator, \"Bearer {s}\", .{bearer_token});\n");
                 try self.buffer.appendSlice(self.allocator, "        try stream_headers.append(client.allocator, .{ .name = \"Authorization\", .value = auth_header.? });\n");
                 try self.buffer.appendSlice(self.allocator, "    }\n");
                 try self.buffer.appendSlice(self.allocator, "    return streamJsonTypedWithExtraHeaders(Event, client, \"");
@@ -336,6 +407,35 @@ pub fn generateComments(self: *UnifiedApiGenerator, operation: Operation) !void 
     }
 }
 
+/// The operation's summary, its description, and the request it makes, as the
+/// doc comment of its function.
+pub fn generateOperationDocComment(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
+    if (!self.args.doc_comments) return;
+    var wrote = false;
+    if (operation.summary) |summary| {
+        try self.appendDocComment("", summary);
+        wrote = std.mem.trim(u8, summary, " \t\r\n").len != 0;
+    }
+    if (operation.description) |description| {
+        const same = if (operation.summary) |summary|
+            std.mem.eql(u8, std.mem.trim(u8, summary, " \t\r\n"), std.mem.trim(u8, description, " \t\r\n"))
+        else
+            false;
+        if (!same and std.mem.trim(u8, description, " \t\r\n").len != 0) {
+            if (wrote) try self.buffer.appendSlice(self.allocator, "///\n");
+            try self.appendDocComment("", description);
+            wrote = true;
+        }
+    }
+    if (wrote) try self.buffer.appendSlice(self.allocator, "///\n");
+    try self.buffer.appendSlice(self.allocator, "/// `");
+    try self.buffer.appendSlice(self.allocator, method);
+    try self.buffer.appendSlice(self.allocator, " ");
+    try self.buffer.appendSlice(self.allocator, path);
+    try self.buffer.appendSlice(self.allocator, "`\n");
+    if (operation.deprecated) try self.buffer.appendSlice(self.allocator, "///\n/// Deprecated.\n");
+}
+
 pub fn generateFunctionSignature(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
     try self.buffer.appendSlice(self.allocator, "pub fn ");
 
@@ -358,8 +458,8 @@ pub fn generateFunctionSignature(self: *UnifiedApiGenerator, method: []const u8,
     }
 }
 
-pub fn generateFunctionBody(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
-    const operation_id = self.operationNameOf(operation) orelse return self.generateFunctionBodyDirect(method, path, operation);
+pub fn generateFunctionBody(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation, document: UnifiedDocument) !void {
+    const operation_id = self.operationNameOf(operation) orelse return self.generateFunctionBodyDirect(method, path, operation, document);
     if (self.hasReturnValue(method, operation)) {
         const result_name = try std.fmt.allocPrint(self.allocator, "{s}Result", .{operation_id});
         defer self.allocator.free(result_name);
@@ -391,7 +491,7 @@ pub fn generateFunctionBody(self: *UnifiedApiGenerator, method: []const u8, path
     try self.buffer.appendSlice(self.allocator, "}\n\n");
 }
 
-pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
+pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation, document: UnifiedDocument) !void {
     try self.buffer.appendSlice(self.allocator, "    const allocator = client.allocator;\n");
 
     var has_body_param = false;
@@ -431,7 +531,7 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     try self.buffer.appendSlice(self.allocator, "    defer ");
     try self.buffer.appendSlice(self.allocator, header_local_names.headers);
     try self.buffer.appendSlice(self.allocator, ".deinit(allocator);\n");
-    try self.buffer.appendSlice(self.allocator, "    const auth_header = try appendClientHeaders(allocator, &");
+    try self.buffer.appendSlice(self.allocator, "    try appendClientHeaders(allocator, &");
     try self.buffer.appendSlice(self.allocator, header_local_names.headers);
     try self.buffer.appendSlice(self.allocator, ", client, ");
     if (has_body_param) {
@@ -442,7 +542,7 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
         try self.buffer.appendSlice(self.allocator, "null");
     }
     try self.buffer.appendSlice(self.allocator, ", \"application/json\");\n");
-    try self.buffer.appendSlice(self.allocator, "    defer if (auth_header) |value| allocator.free(value);\n");
+    try self.appendAuthHeader(authSchemeForOperation(document, operation), header_local_names);
     const direct_has_header_params = hasHeaderParams(operation);
     if (direct_has_header_params) {
         try self.appendHeaderValuesLocal(header_local_names);
@@ -466,7 +566,8 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
             else
                 parameter.type orelse .string;
             const param_type = switch (path_type) {
-                .string => "s",
+                // Strings go through `OpenApiPathSegment`, which percent-encodes them.
+                .string => "f",
                 .integer => "d",
                 .number => "d",
                 else => "any",
@@ -517,13 +618,7 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     };
     if (has_path_param_direct) try self.buffer.appendSlice(self.allocator, " ");
     try self.buffer.appendSlice(self.allocator, "client.base_url");
-    if (operation.parameters) |parameters| {
-        for (parameters, 0..) |parameter, i| {
-            if (parameter.location != .path) continue;
-            try self.buffer.appendSlice(self.allocator, ", ");
-            try self.appendParamReference(operation, method, path, i, parameter);
-        }
-    }
+    try self.appendPathArguments(operation, method, path);
     if (has_path_param_direct) try self.buffer.appendSlice(self.allocator, " ");
     try self.buffer.appendSlice(self.allocator, "});\n");
 
@@ -606,21 +701,14 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     try self.buffer.appendSlice(self.allocator, "    }\n");
 
     try self.buffer.appendSlice(self.allocator, "    const start = std.Io.Clock.awake.now(client.io);\n");
-    try self.buffer.appendSlice(self.allocator, "    const result = client.http.fetch(.{\n");
-    try self.buffer.appendSlice(self.allocator, "        .location = .{ .uri = uri },\n");
-    try self.buffer.appendSlice(self.allocator, "        .method = std.http.Method.");
+    try self.buffer.appendSlice(self.allocator, "    const result = fetchFollowingRedirects(client, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ",\n");
-    try self.buffer.appendSlice(self.allocator, "        .extra_headers = ");
+    try self.buffer.appendSlice(self.allocator, ", uri, ");
     try self.buffer.appendSlice(self.allocator, header_local_names.headers);
-    try self.buffer.appendSlice(self.allocator, ".items,\n");
-    if (has_body_param) {
-        try self.buffer.appendSlice(self.allocator, "        .payload = payload,\n");
-    }
-    if (has_return_value) {
-        try self.buffer.appendSlice(self.allocator, "        .response_writer = &response_body.writer,\n");
-    }
-    try self.buffer.appendSlice(self.allocator, "    }) catch |err| {\n");
+    try self.buffer.appendSlice(self.allocator, ".items, ");
+    try self.buffer.appendSlice(self.allocator, if (has_body_param) "payload, " else "null, ");
+    try self.buffer.appendSlice(self.allocator, if (has_return_value) "&response_body.writer" else "null");
+    try self.buffer.appendSlice(self.allocator, ") catch |err| {\n");
     try self.buffer.appendSlice(self.allocator, "        if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "            if (obs.onError) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
@@ -633,13 +721,15 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
     try self.buffer.appendSlice(self.allocator, "        if (client.http_observer) |obs| {\n");
     try self.buffer.appendSlice(self.allocator, "            if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
     try self.buffer.appendSlice(self.allocator, method);
-    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, \"\", elapsed_ns);\n");
+    try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, \"\", elapsed_ns);\n");
     try self.buffer.appendSlice(self.allocator, "        }\n");
+    try self.buffer.appendSlice(self.allocator, "        result.deinit(allocator);\n");
     try self.buffer.appendSlice(self.allocator, "        return error.ResponseError;\n");
     try self.buffer.appendSlice(self.allocator, "    }\n");
 
     if (has_return_value) {
         try self.buffer.appendSlice(self.allocator, "\n");
+        try self.buffer.appendSlice(self.allocator, "    errdefer result.deinit(allocator);\n");
         try self.buffer.appendSlice(self.allocator, "    const body = try response_body.toOwnedSlice();\n");
         try self.buffer.appendSlice(self.allocator, "    errdefer allocator.free(body);\n");
         try self.buffer.appendSlice(self.allocator, "    const parsed = try std.json.parseFromSlice(");
@@ -648,14 +738,15 @@ pub fn generateFunctionBodyDirect(self: *UnifiedApiGenerator, method: []const u8
         try self.buffer.appendSlice(self.allocator, "    if (client.http_observer) |obs| {\n");
         try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
         try self.buffer.appendSlice(self.allocator, method);
-        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, body, elapsed_ns);\n");
+        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, body, elapsed_ns);\n");
         try self.buffer.appendSlice(self.allocator, "    }\n");
-        try self.buffer.appendSlice(self.allocator, "    return .{ .allocator = allocator, .body = body, .parsed = parsed };\n");
+        try self.buffer.appendSlice(self.allocator, "    return .{ .allocator = allocator, .body = body, .parsed = parsed, .headers = result.headers, .header_storage = result.header_storage };\n");
     } else {
+        try self.buffer.appendSlice(self.allocator, "    defer result.deinit(allocator);\n");
         try self.buffer.appendSlice(self.allocator, "    if (client.http_observer) |obs| {\n");
         try self.buffer.appendSlice(self.allocator, "        if (obs.onResponse) |cb| cb(obs.ctx, std.http.Method.");
         try self.buffer.appendSlice(self.allocator, method);
-        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, &.{}, \"\", elapsed_ns);\n");
+        try self.buffer.appendSlice(self.allocator, ", uri_buf.written(), result.status, result.headers, \"\", elapsed_ns);\n");
         try self.buffer.appendSlice(self.allocator, "    }\n");
     }
 
@@ -676,15 +767,23 @@ pub fn successResponseSchema(self: *UnifiedApiGenerator, operation: Operation) ?
         }
     }
 
+    // Map iteration order is arbitrary, so pick the lowest remaining 2xx code
+    // (exact codes sort before the `2XX` wildcard) to keep output stable.
+    var best_code: ?[]const u8 = null;
+    var best_schema: ?Schema = null;
     var iterator = operation.responses.iterator();
     while (iterator.next()) |entry| {
         const code = entry.key_ptr.*;
         if (code.len == 3 and code[0] == '2') {
-            if (entry.value_ptr.schema) |schema| return schema;
+            const schema = entry.value_ptr.schema orelse continue;
+            if (best_code == null or std.mem.lessThan(u8, code, best_code.?)) {
+                best_code = code;
+                best_schema = schema;
+            }
         }
     }
 
-    return null;
+    return best_schema;
 }
 
 pub fn appendReturnType(self: *UnifiedApiGenerator, method: []const u8, operation: Operation) !void {
@@ -757,7 +856,7 @@ pub fn appendZigTypeFromSchema(self: *UnifiedApiGenerator, schema: Schema) !void
     if (schema.ref) |ref| {
         if (std.mem.lastIndexOf(u8, ref, "/")) |last_slash| {
             try self.buffer.appendSlice(self.allocator, self.model_prefix);
-            try self.appendIdentifier(ref[last_slash + 1 ..]);
+            try self.appendIdentifier(self.typeName(ref[last_slash + 1 ..]));
             return;
         }
     }

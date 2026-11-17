@@ -95,6 +95,16 @@ pub const generator = @import("generator.zig");
 /// - args: The same arguments the CLI accepts, as a struct
 pub const generateFromSpec = generator.generateCode;
 
+/// Generate a complete SDK repository (Zig sources, build files, docs, CI
+/// workflows and examples) for an already converted document. `args` must come
+/// from `sdk.prepare` (it applies the config file settings) and the document
+/// must already be filtered by `args.tags`. `args.sdk` is
+/// expected to be set and `args.sdk_config_path` must point at an existing
+/// `openapi2zig.json`; see `sdk.prepare` to create one.
+pub const generateSdk = sdk.generateSdk;
+pub const sdk = @import("generators/sdk/scaffold.zig");
+pub const SdkConfig = @import("generators/sdk/config.zig").SdkConfig;
+
 /// Parse a JSON string containing an OpenAPI or Swagger specification and convert it to a unified document representation.
 /// The caller is responsible for calling `deinit()` on the returned document.
 ///
@@ -250,8 +260,16 @@ pub fn generateModelsWithArgs(allocator: std.mem.Allocator, unified_doc: Unified
     var model_generator = UnifiedModelGenerator.init(allocator);
     defer model_generator.deinit();
     model_generator.generate_enums = args.generate_enums;
+    model_generator.doc_comments = args.doc_comments;
+    model_generator.model_naming = args.model_naming;
+    model_generator.string_enums = args.string_enums;
 
     return try model_generator.generate(unified_doc);
+}
+
+/// Like `generateModels`, with a choice of how schema names become type names.
+pub fn generateModelsNamed(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, naming: @import("generators/unified/model_names.zig").Mode) ![]const u8 {
+    return try generateModelsWithArgs(allocator, unified_doc, .{ .input_path = "", .model_naming = naming });
 }
 
 /// Generate Zig API client functions from a unified document.
@@ -344,6 +362,8 @@ pub const GeneratedFiles = struct {
 /// `args.runtime_only` is set, only the runtime file is generated (`models` is
 /// empty and `client` is null) and `unified_doc` is ignored.
 pub fn generateCodeMultiple(allocator: std.mem.Allocator, unified_doc: UnifiedDocument, args: CliArgs) !GeneratedFiles {
+    // The extra files of split mode do not fit this result, so refuse it.
+    if (args.split_by_tag) return error.UnsupportedSplitByTag;
     if (args.runtime_only) {
         try rejectRuntimeOnlyConflicts(args);
         var runtime_gen = RuntimeGenerator.init(allocator);

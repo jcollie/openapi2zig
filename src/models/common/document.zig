@@ -111,6 +111,7 @@ pub const Schema = struct {
     discriminator_property: ?[]const u8 = null,
     one_of: ?[]Schema = null,
     any_of: ?[]Schema = null,
+    /// Explicit `additionalProperties` boolean. A schema value leaves this null.
     additional_properties: ?bool = null,
     nullable: bool = false,
     pub fn deinit(self: *Schema, allocator: std.mem.Allocator) void {
@@ -169,6 +170,13 @@ pub const Parameter = struct {
     /// Declared media type for body parameters. Owned by `allocator` (duped at
     /// converter time) when non-null. Always null for non-body parameters.
     content_type: ?[]const u8 = null,
+    /// The values the parameter may take, for a Swagger 2.0 parameter that
+    /// declares them on itself (or on its `items`) rather than in a schema.
+    /// Borrowed from the source document, so `deinit` never frees it.
+    enum_values: ?[]const json.Value = null,
+    /// A Swagger 2.0 `formData` parameter of `type: file`: one part of a
+    /// `multipart/form-data` body, carrying a file rather than a value.
+    file: bool = false,
     pub fn deinit(self: *Parameter, allocator: std.mem.Allocator) void {
         if (self.schema) |*schema| schema.deinit(allocator);
         if (self.content_type) |ct| allocator.free(ct);
@@ -203,6 +211,8 @@ pub const Operation = struct {
     deprecated: bool = false,
     security: ?[]SecurityRequirement = null,
     streaming: bool = false,
+    /// The property holding the next page link, from `x-ms-pageable`. Borrowed.
+    next_link_name: ?[]const u8 = null,
     pub fn deinit(self: *Operation, allocator: std.mem.Allocator) void {
         if (self.tags) |tags| {
             allocator.free(tags);

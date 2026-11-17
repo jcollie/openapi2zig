@@ -1,4 +1,5 @@
 const std = @import("std");
+const stream_parameters = @import("streaming.zig");
 const UnifiedDocument = @import("../../../models/common/document.zig").UnifiedDocument;
 const Operation = @import("../../../models/common/document.zig").Operation;
 const ident = @import("../ident_utils.zig");
@@ -38,26 +39,41 @@ pub fn generateTagClients(self: *UnifiedApiGenerator, document: UnifiedDocument)
         groups.deinit(self.allocator);
     }
 
+    // An operation belongs to the client of every tag it carries, not just
+    // the first: a spec that files an operation under two tags means it to be
+    // found under both. Untagged operations land in DefaultClient.
     for (operations.items) |op_ref| {
-        const struct_name = try self.tagClientNameAlloc(op_ref.operation);
+        const tags: []const []const u8 = if (op_ref.operation.tags) |tags| tags else &.{};
+        const tag_count = @max(tags.len, 1);
+        for (0..tag_count) |tag_index| {
+            const tag = if (tags.len == 0) "" else tags[tag_index];
+            const struct_name = try self.tagClientNameAlloc(tag);
 
-        var group_index: ?usize = null;
-        for (groups.items, 0..) |group, i| {
-            if (std.mem.eql(u8, group.name, struct_name)) {
-                group_index = i;
-                break;
+            var group_index: ?usize = null;
+            for (groups.items, 0..) |group, i| {
+                if (std.mem.eql(u8, group.name, struct_name)) {
+                    group_index = i;
+                    break;
+                }
             }
-        }
 
-        if (group_index) |idx| {
-            self.allocator.free(struct_name);
-            try groups.items[idx].methods.append(self.allocator, op_ref);
-        } else {
-            errdefer self.allocator.free(struct_name);
-            var methods = std.ArrayList(OperationRef).empty;
-            errdefer methods.deinit(self.allocator);
-            try methods.append(self.allocator, op_ref);
-            try groups.append(self.allocator, .{ .name = struct_name, .methods = methods });
+            if (group_index) |idx| {
+                self.allocator.free(struct_name);
+                // A tag repeated, or two tags that name the same client, must
+                // not add the operation to it twice.
+                const methods = &groups.items[idx].methods;
+                if (methods.items.len > 0) {
+                    const last = methods.items[methods.items.len - 1];
+                    if (std.mem.eql(u8, last.path, op_ref.path) and std.mem.eql(u8, last.method, op_ref.method)) continue;
+                }
+                try methods.append(self.allocator, op_ref);
+            } else {
+                errdefer self.allocator.free(struct_name);
+                var methods = std.ArrayList(OperationRef).empty;
+                errdefer methods.deinit(self.allocator);
+                try methods.append(self.allocator, op_ref);
+                try groups.append(self.allocator, .{ .name = struct_name, .methods = methods });
+            }
         }
     }
 
@@ -170,9 +186,23 @@ pub fn generateTagClients(self: *UnifiedApiGenerator, document: UnifiedDocument)
             used_method_names.deinit();
         }
 
+        var method_names = std.ArrayList([]const u8).empty;
+        defer method_names.deinit(self.allocator);
         for (group.methods.items) |op_ref| {
             const method_name = try self.uniqueTagClientMethodNameAlloc(op_ref, used_method_names);
             try self.registerTagClientMethodNames(method_name, op_ref, &used_method_names);
+            try method_names.append(self.allocator, method_name);
+        }
+        var scope_names = std.ArrayList([]const u8).empty;
+        defer scope_names.deinit(self.allocator);
+        try scope_names.appendSlice(self.allocator, &.{ struct_name, "init", "deinit", "client" });
+        var names = used_method_names.keyIterator();
+        while (names.next()) |name| try scope_names.append(self.allocator, name.*);
+        const outer_scope = self.parameter_scope_names;
+        self.parameter_scope_names = scope_names.items;
+        defer self.parameter_scope_names = outer_scope;
+
+        for (group.methods.items, method_names.items) |op_ref, method_name| {
             const op_name = self.operationNameOf(op_ref.operation);
             const needs_alias = if (op_name) |op_id| aliased.contains(op_id) else false;
             const needs_events_alias = if (op_name) |op_id| aliased_events.contains(op_id) else false;
@@ -232,7 +262,7 @@ pub fn endpointClientNameAlloc(self: *UnifiedApiGenerator, op_ref: OperationRef,
     else
         try self.endpointFallbackNameAlloc(op_ref.method, op_ref.path);
     errdefer self.allocator.free(candidate);
-    while (self.topLevelNameConflicts(candidate, document) or used_names.contains(candidate)) {
+    while (try self.topLevelNameConflicts(candidate, document) or used_names.contains(candidate)) {
         const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{candidate});
         self.allocator.free(candidate);
         candidate = suffixed;
@@ -244,6 +274,9 @@ pub fn generateEndpointClient(self: *UnifiedApiGenerator, struct_name: []const u
     const method = op_ref.method;
     const operation = op_ref.operation;
     const has_return = self.hasReturnValue(method, operation);
+    const outer_scope = self.parameter_scope_names;
+    self.parameter_scope_names = &.{ struct_name, "init", "client", "execute", "executeRaw", "executeResult", "executeStreaming", "executeStreamingEvents" };
+    defer self.parameter_scope_names = outer_scope;
 
     try self.buffer.appendSlice(self.allocator, "pub const ");
     try self.buffer.appendSlice(self.allocator, struct_name);
@@ -314,10 +347,12 @@ pub fn generateEndpointClient(self: *UnifiedApiGenerator, struct_name: []const u
 
             try self.buffer.appendSlice(self.allocator, "    pub fn executeStreaming(self: *");
             try self.buffer.appendSlice(self.allocator, struct_name);
-            try self.buffer.appendSlice(self.allocator, ", requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+            try stream_parameters.appendParameters(self, operation, op_ref.path);
+            try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
             try self.buffer.appendSlice(self.allocator, "        return ");
             try self.appendIdentifier(stream_operation_name);
-            try self.buffer.appendSlice(self.allocator, "(self.client, requestBody, callback, cancellation_token);\n");
+            try stream_parameters.appendCall(self, operation, "self.client", false);
+            try self.buffer.appendSlice(self.allocator, ";\n");
             try self.buffer.appendSlice(self.allocator, "    }\n\n");
 
             const stream_events_operation_name = try std.fmt.allocPrint(self.allocator, "{s}StreamingEvents", .{op_id});
@@ -325,10 +360,12 @@ pub fn generateEndpointClient(self: *UnifiedApiGenerator, struct_name: []const u
 
             try self.buffer.appendSlice(self.allocator, "    pub fn executeStreamingEvents(comptime Event: type, self: *");
             try self.buffer.appendSlice(self.allocator, struct_name);
-            try self.buffer.appendSlice(self.allocator, ", requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+            try stream_parameters.appendParameters(self, operation, op_ref.path);
+            try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
             try self.buffer.appendSlice(self.allocator, "        return ");
             try self.appendIdentifier(stream_events_operation_name);
-            try self.buffer.appendSlice(self.allocator, "(Event, self.client, requestBody, callback, cancellation_token);\n");
+            try stream_parameters.appendCall(self, operation, "self.client", true);
+            try self.buffer.appendSlice(self.allocator, ";\n");
             try self.buffer.appendSlice(self.allocator, "    }\n\n");
         }
     }
@@ -336,46 +373,82 @@ pub fn generateEndpointClient(self: *UnifiedApiGenerator, struct_name: []const u
     try self.buffer.appendSlice(self.allocator, "};\n\n");
 }
 
-pub fn topLevelNameConflicts(self: *UnifiedApiGenerator, name: []const u8, document: UnifiedDocument) bool {
+pub fn topLevelNameConflicts(self: *UnifiedApiGenerator, name: []const u8, document: UnifiedDocument) std.mem.Allocator.Error!bool {
     const runtime_names = [_][]const u8{
-        "Client",        "Owned",                     "RawResponse",        "ParseErrorResponse",  "ApiResult",        "HttpObserver",  "CancellationToken",
-        "requestRaw",    "requestRawWithContentType", "getRaw",             "postJsonRaw",         "parseRawResponse", "getJsonResult", "postJsonResult",
-        "parseSseBytes", "parseSseReader",            "parseSseBytesTyped", "parseSseReaderTyped",
+        "Client",         "Owned",                     "RawResponse",        "ParseErrorResponse",  "ApiResult",               "HttpObserver",  "CancellationToken",
+        "requestRaw",     "requestRawWithContentType", "getRaw",             "postJsonRaw",         "parseRawResponse",        "getJsonResult", "postJsonResult",
+        "parseSseBytes",  "parseSseReader",            "parseSseBytesTyped", "parseSseReaderTyped", "fetchFollowingRedirects", "fetchOnce",     "HttpFetchResult",
+        "isSameOrigin",   "originPort",                "retryAfterSeconds",  "parseHttpDate",       "isRetryableStatus",       "findHeader",    "OperationInfo",
+        "operation_info", "FormFile",                  "Multipart",
     };
     for (runtime_names) |runtime_name| {
         if (std.mem.eql(u8, name, runtime_name)) return true;
     }
 
-    var options_iterator = self.options_type_names.valueIterator();
-    while (options_iterator.next()) |options_name| {
-        if (std.mem.eql(u8, options_name.*, name)) return true;
-    }
+    if (self.options_name_set.contains(name)) return true;
 
     if (document.schemas) |schemas| {
-        var schema_iterator = schemas.iterator();
-        while (schema_iterator.next()) |entry| {
-            if (std.mem.eql(u8, entry.key_ptr.*, name)) return true;
-        }
+        const declared = if (self.name_map) |*map| map.declared.contains(name) else schemas.contains(name);
+        if (declared) return true;
     }
 
+    if (!self.top_level_names_ready) {
+        try buildTopLevelNames(self, document);
+        self.top_level_names_ready = true;
+    }
+    return self.top_level_names.contains(name);
+}
+
+/// Collects the names every operation declares at the top level (the function,
+/// its `Raw` and `Result` variants and the streaming pair).
+fn buildTopLevelNames(self: *UnifiedApiGenerator, document: UnifiedDocument) !void {
     var path_iterator = document.paths.iterator();
     while (path_iterator.next()) |entry| {
         const path_item = entry.value_ptr.*;
-        if (operationDeclaresTopLevelName(self, path_item.get, "GET", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.post, "POST", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.put, "PUT", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.delete, "DELETE", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.patch, "PATCH", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.head, "HEAD", name)) return true;
-        if (operationDeclaresTopLevelName(self, path_item.options, "OPTIONS", name)) return true;
+        try addOperationTopLevelNames(self, path_item.get, "GET");
+        try addOperationTopLevelNames(self, path_item.post, "POST");
+        try addOperationTopLevelNames(self, path_item.put, "PUT");
+        try addOperationTopLevelNames(self, path_item.delete, "DELETE");
+        try addOperationTopLevelNames(self, path_item.patch, "PATCH");
+        try addOperationTopLevelNames(self, path_item.head, "HEAD");
+        try addOperationTopLevelNames(self, path_item.options, "OPTIONS");
     }
-    return false;
+}
+
+fn addOperationTopLevelNames(self: *UnifiedApiGenerator, maybe_operation: ?Operation, method: []const u8) !void {
+    const operation = maybe_operation orelse return;
+    const raw_operation_id = operation.operationId orelse return;
+    const operation_id = self.operationName(raw_operation_id);
+    try self.top_level_names.put(operation_id, {});
+    try putOwnedTopLevelName(self, "{s}Raw", operation_id);
+    if (self.hasReturnValue(method, operation)) {
+        try putOwnedTopLevelName(self, "{s}Result", operation_id);
+    }
+    if (self.args.pagination and operation.next_link_name != null) {
+        try putOwnedTopLevelName(self, "{s}Pages", operation_id);
+    }
+    if (operation.streaming and std.mem.eql(u8, method, "POST")) {
+        try putOwnedTopLevelName(self, "{s}Streaming", operation_id);
+        try putOwnedTopLevelName(self, "{s}StreamingEvents", operation_id);
+    }
+}
+
+/// Formats `fmt` with `operation_id`, keeps the string alive for the lifetime
+/// of the name cache and records it as a declared top-level name.
+fn putOwnedTopLevelName(self: *UnifiedApiGenerator, comptime fmt: []const u8, operation_id: []const u8) !void {
+    const name = try std.fmt.allocPrint(self.allocator, fmt, .{operation_id});
+    self.top_level_owned.append(self.allocator, name) catch |err| {
+        self.allocator.free(name);
+        return err;
+    };
+    // From here the list owns `name`, so a failed put leaks nothing.
+    try self.top_level_names.put(name, {});
 }
 
 pub fn uniqueTagClientStructNameAlloc(self: *UnifiedApiGenerator, name: []const u8, document: UnifiedDocument, used_names: std.StringHashMap(void)) ![]const u8 {
     var candidate = try self.allocator.dupe(u8, name);
     errdefer self.allocator.free(candidate);
-    while (self.topLevelNameConflicts(candidate, document) or used_names.contains(candidate)) {
+    while (try self.topLevelNameConflicts(candidate, document) or used_names.contains(candidate)) {
         const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{candidate});
         self.allocator.free(candidate);
         candidate = suffixed;
@@ -480,8 +553,8 @@ pub fn tagClientFallbackMethodNameAlloc(self: *UnifiedApiGenerator, op_ref: Oper
     return method;
 }
 
-pub fn tagClientNameAlloc(self: *UnifiedApiGenerator, operation: Operation) ![]const u8 {
-    const tag: []const u8 = if (operation.tags) |tags| (if (tags.len > 0) tags[0] else "") else "";
+/// The client struct name for `tag`; the empty tag names DefaultClient.
+pub fn tagClientNameAlloc(self: *UnifiedApiGenerator, tag: []const u8) ![]const u8 {
     if (tag.len == 0) return try self.allocator.dupe(u8, "DefaultClient");
     const pascal = try toPascalCaseAlloc(self.allocator, tag);
     defer self.allocator.free(pascal);
@@ -583,11 +656,13 @@ pub fn generateTagClientMethod(self: *UnifiedApiGenerator, struct_name: []const 
             try self.buffer.appendSlice(self.allocator, stream_method_name);
             try self.buffer.appendSlice(self.allocator, "(self: *");
             try self.buffer.appendSlice(self.allocator, struct_name);
-            try self.buffer.appendSlice(self.allocator, ", requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+            try stream_parameters.appendParameters(self, operation, op_ref.path);
+            try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
             try self.buffer.appendSlice(self.allocator, "        return ");
             if (needs_alias) try self.buffer.appendSlice(self.allocator, "_");
             try self.appendIdentifier(stream_operation_name);
-            try self.buffer.appendSlice(self.allocator, "(self.client, requestBody, callback, cancellation_token);\n");
+            try stream_parameters.appendCall(self, operation, "self.client", false);
+            try self.buffer.appendSlice(self.allocator, ";\n");
             try self.buffer.appendSlice(self.allocator, "    }\n\n");
 
             const stream_events_method_name = try std.fmt.allocPrint(self.allocator, "{s}StreamEvents", .{method_name});
@@ -599,11 +674,13 @@ pub fn generateTagClientMethod(self: *UnifiedApiGenerator, struct_name: []const 
             try self.buffer.appendSlice(self.allocator, stream_events_method_name);
             try self.buffer.appendSlice(self.allocator, "(comptime Event: type, self: *");
             try self.buffer.appendSlice(self.allocator, struct_name);
-            try self.buffer.appendSlice(self.allocator, ", requestBody: anytype, callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
+            try stream_parameters.appendParameters(self, operation, op_ref.path);
+            try self.buffer.appendSlice(self.allocator, ", callback: anytype, cancellation_token: ?*CancellationToken) !void {\n");
             try self.buffer.appendSlice(self.allocator, "        return ");
             if (needs_events_alias) try self.buffer.appendSlice(self.allocator, "_");
             try self.appendIdentifier(stream_events_operation_name);
-            try self.buffer.appendSlice(self.allocator, "(Event, self.client, requestBody, callback, cancellation_token);\n");
+            try stream_parameters.appendCall(self, operation, "self.client", true);
+            try self.buffer.appendSlice(self.allocator, ";\n");
             try self.buffer.appendSlice(self.allocator, "    }\n\n");
         }
     }
@@ -622,8 +699,11 @@ pub fn appendTagClientCallArguments(self: *UnifiedApiGenerator, operation: Opera
         for (params) |param| {
             if (self.args.parameters_as_struct and param.location != .body) continue;
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendFlatParamIdentifier(name);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendFlatParamIdentifier(param.name);
+            }
         }
     }
     try self.buffer.appendSlice(self.allocator, ")");

@@ -1,5 +1,7 @@
 const std = @import("std");
 const Operation = @import("../../../models/common/document.zig").Operation;
+const Parameter = @import("../../../models/common/document.zig").Parameter;
+const SchemaType = @import("../../../models/common/document.zig").SchemaType;
 const helpers = @import("helpers.zig");
 const AuthScheme = helpers.AuthScheme;
 const HeaderLocalNames = helpers.HeaderLocalNames;
@@ -119,8 +121,9 @@ pub fn appendAuthHeader(self: *UnifiedApiGenerator, scheme: ?AuthScheme, names: 
             .bearer => {
                 try self.buffer.appendSlice(self.allocator, "    var auth_header: ?[]u8 = null;\n");
                 try self.buffer.appendSlice(self.allocator, "    defer if (auth_header) |value| allocator.free(value);\n");
-                try self.buffer.appendSlice(self.allocator, "    if (client.api_key.len > 0) {\n");
-                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(allocator, \"Bearer {s}\", .{client.api_key});\n");
+                try self.buffer.appendSlice(self.allocator, "    const bearer_holder = try requestToken(client, allocator);\n    defer bearer_holder.deinit(allocator);\n    const bearer_token = bearer_holder.value;\n");
+                try self.buffer.appendSlice(self.allocator, "    if (bearer_token.len > 0) {\n");
+                try self.buffer.appendSlice(self.allocator, "        auth_header = try std.fmt.allocPrint(allocator, \"Bearer {s}\", .{bearer_token});\n");
                 try self.buffer.appendSlice(self.allocator, "        try ");
                 try self.buffer.appendSlice(self.allocator, names.headers);
                 try self.buffer.appendSlice(self.allocator, ".append(allocator, .{ .name = \"Authorization\", .value = auth_header.? });\n");
@@ -137,6 +140,41 @@ pub fn appendAuthHeader(self: *UnifiedApiGenerator, scheme: ?AuthScheme, names: 
     }
 }
 
+/// Emits one format argument per placeholder, in the order the path template
+/// uses them. A description may list its parameters in any order, so walking
+/// the parameter list would put values in the wrong path segments.
+pub fn appendPathArguments(self: *UnifiedApiGenerator, operation: Operation, method: []const u8, path: []const u8) !void {
+    const parameters = operation.parameters orelse return;
+
+    var rest = path;
+    while (std.mem.indexOfScalar(u8, rest, '{')) |open| {
+        const close = std.mem.indexOfScalarPos(u8, rest, open, '}') orelse break;
+        const name = rest[open + 1 .. close];
+        rest = rest[close + 1 ..];
+        for (parameters, 0..) |parameter, i| {
+            if (parameter.location != .path or !std.mem.eql(u8, parameter.name, name)) continue;
+            try self.buffer.appendSlice(self.allocator, ", ");
+            // String segments are percent-encoded by the `OpenApiPathSegment` formatter.
+            const encode = isStringPathParameter(parameter);
+            if (encode) try self.buffer.appendSlice(self.allocator, "OpenApiPathSegment{ .value = ");
+            try self.appendParamReference(operation, method, path, i, parameter);
+            if (encode) try self.buffer.appendSlice(self.allocator, " }");
+            break;
+        }
+    }
+
+    // A parameter its path never uses still gets an argument, so the generated
+    // code fails to compile instead of silently ignoring the value.
+    for (parameters, 0..) |parameter, i| {
+        if (parameter.location != .path) continue;
+        const placeholder = try std.fmt.allocPrint(self.allocator, "{{{s}}}", .{parameter.name});
+        defer self.allocator.free(placeholder);
+        if (std.mem.indexOf(u8, path, placeholder) != null) continue;
+        try self.buffer.appendSlice(self.allocator, ", ");
+        try self.appendParamReference(operation, method, path, i, parameter);
+    }
+}
+
 pub fn appendUrlConstruction(self: *UnifiedApiGenerator, method: []const u8, path: []const u8, operation: Operation) !void {
     var new_path = path;
     var allocated_paths = std.ArrayList([]u8).empty;
@@ -149,12 +187,10 @@ pub fn appendUrlConstruction(self: *UnifiedApiGenerator, method: []const u8, pat
         for (parameters) |parameter| {
             if (parameter.location != .path) continue;
             const param = parameter.name;
-            const path_type = if (parameter.schema) |schema|
-                schema.type orelse .string
-            else
-                parameter.type orelse .string;
+            const path_type = pathParameterType(parameter);
             const param_type = switch (path_type) {
-                .string => "s",
+                // Strings go through `OpenApiPathSegment`, which percent-encodes them.
+                .string => "f",
                 .integer => "d",
                 .number => "d",
                 else => "any",
@@ -205,13 +241,7 @@ pub fn appendUrlConstruction(self: *UnifiedApiGenerator, method: []const u8, pat
     };
     if (has_path_param) try self.buffer.appendSlice(self.allocator, " ");
     try self.buffer.appendSlice(self.allocator, "client.base_url");
-    if (operation.parameters) |parameters| {
-        for (parameters, 0..) |parameter, i| {
-            if (parameter.location != .path) continue;
-            try self.buffer.appendSlice(self.allocator, ", ");
-            try self.appendParamReference(operation, method, path, i, parameter);
-        }
-    }
+    try self.appendPathArguments(operation, method, path);
     if (has_path_param) try self.buffer.appendSlice(self.allocator, " ");
     try self.buffer.appendSlice(self.allocator, "});\n");
 
@@ -258,4 +288,17 @@ pub fn hasBodyParameter(self: *UnifiedApiGenerator, operation: Operation) bool {
         }
     }
     return false;
+}
+
+fn pathParameterType(parameter: Parameter) SchemaType {
+    return if (parameter.schema) |schema|
+        schema.type orelse .string
+    else
+        parameter.type orelse .string;
+}
+
+/// Whether a path parameter is substituted as a plain string and therefore has
+/// to be percent-encoded.
+fn isStringPathParameter(parameter: Parameter) bool {
+    return pathParameterType(parameter) == .string;
 }
