@@ -108,8 +108,8 @@ fn addString(self: *Parser, gpa: Allocator, string: []const u8) Allocator.Error!
 }
 
 fn addExtra(self: *Parser, gpa: Allocator, extra: anytype) Allocator.Error!u32 {
-    const field_count = @typeInfo(@TypeOf(extra)).@"struct".field_names.len;
-    try self.extra.ensureUnusedCapacity(gpa, field_count);
+    const field_names = @typeInfo(@TypeOf(extra)).@"struct".field_names;
+    try self.extra.ensureUnusedCapacity(gpa, field_names.len);
     return self.addExtraAssumeCapacity(extra);
 }
 
@@ -122,12 +122,12 @@ fn addExtraAssumeCapacity(self: *Parser, extra: anytype) u32 {
 fn payloadToExtraItems(data: anytype) [@typeInfo(@TypeOf(data)).@"struct".field_names.len]u32 {
     const info = @typeInfo(@TypeOf(data)).@"struct";
     var result: [info.field_names.len]u32 = undefined;
-    inline for (&result, info.field_names, info.field_types) |*val, field_name, FieldType| {
-        val.* = switch (FieldType) {
+    inline for (&result, info.field_names, info.field_types) |*val, field_name, field_type| {
+        val.* = switch (field_type) {
             u32 => @field(data, field_name),
             i32 => @bitCast(@field(data, field_name)),
             Node.Index, Node.OptionalIndex, Token.Index => @backingInt(@field(data, field_name)),
-            else => @compileError("bad field type: " ++ @typeName(FieldType)),
+            else => @compileError("bad field type: " ++ @typeName(field_type)),
         };
     }
     return result;
@@ -160,6 +160,10 @@ fn value(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
             // list
             self.token_it.seekBy(-1);
             return self.list(gpa);
+        },
+        .flow_map_start => {
+            self.token_it.seekBy(-1);
+            return self.mapBracketed(gpa);
         },
         .flow_seq_start => {
             // list
@@ -390,6 +394,67 @@ fn list(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
     });
 
     return node_index.toOptional();
+}
+
+/// A flow mapping (`{ }` or `{ key: value, ... }`). Only what OpenAPI
+/// descriptions use is supported: literal or quoted keys with any value.
+fn mapBracketed(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
+    const node_index = try self.nodes.addOne(gpa);
+    const node_start = self.token_it.pos;
+
+    var entries: std.ArrayListUnmanaged(Map.Entry) = .empty;
+    defer entries.deinit(gpa);
+
+    log.debug("(flow map) begin {s}@{d}", .{ @tagName(self.token(node_start).id), node_start });
+
+    _ = try self.expectToken(.flow_map_start, &.{});
+
+    const node_end: Token.Index = while (true) {
+        self.eatCommentsAndSpace(&.{});
+
+        if (self.eatToken(.flow_map_end, &.{})) |pos| break pos;
+        _ = self.eatToken(.comma, &.{});
+        self.eatCommentsAndSpace(&.{});
+        if (self.eatToken(.flow_map_end, &.{})) |pos| break pos;
+
+        const key_pos = self.token_it.pos;
+        const key = self.token_it.next() orelse return error.UnexpectedEof;
+        switch (key.id) {
+            .literal, .single_quoted, .double_quoted => {},
+            else => return self.fail(gpa, key_pos, "unexpected token for flow map key: {}", .{key}),
+        }
+
+        _ = self.expectToken(.map_value_ind, &.{ .new_line, .comment }) catch
+            return self.fail(gpa, self.token_it.pos, "expected map separator ':'", .{});
+
+        const value_index = try self.value(gpa);
+        try entries.append(gpa, .{ .key = key_pos, .maybe_node = value_index });
+    };
+
+    log.debug("(flow map) end {s}@{d}", .{ @tagName(self.token(node_end).id), node_end });
+
+    const scope: Node.Scope = .{ .start = node_start, .end = node_end };
+
+    if (entries.items.len == 1) {
+        const entry = entries.items[0];
+        self.nodes.set(node_index, .{
+            .tag = .map_single,
+            .scope = scope,
+            .data = .{ .map = .{ .key = entry.key, .maybe_node = entry.maybe_node } },
+        });
+    } else {
+        try self.extra.ensureUnusedCapacity(gpa, entries.items.len * 2 + 1);
+        const extra_index: u32 = @intCast(self.extra.items.len);
+        _ = self.addExtraAssumeCapacity(Map{ .map_len = @intCast(entries.items.len) });
+        for (entries.items) |entry| _ = self.addExtraAssumeCapacity(entry);
+        self.nodes.set(node_index, .{
+            .tag = .map_many,
+            .scope = scope,
+            .data = .{ .extra = @fromBackingInt(@intCast(extra_index)) },
+        });
+    }
+
+    return @as(Node.Index, @fromBackingInt(@intCast(node_index))).toOptional();
 }
 
 fn listBracketed(self: *Parser, gpa: Allocator) ParseError!Node.OptionalIndex {
@@ -713,6 +778,40 @@ fn parseDoubleQuoted(self: *Parser, gpa: Allocator, raw: []const u8) ParseError!
                     state = .start;
                     self.string_bytes.appendAssumeCapacity('"');
                     string.len += 1;
+                },
+                'r', '0', '/', 'b', 'f', 'a', 'v', 'e', ' ' => {
+                    state = .start;
+                    self.string_bytes.appendAssumeCapacity(switch (c) {
+                        'r' => '\r',
+                        '0' => 0,
+                        '/' => '/',
+                        'b' => 0x08,
+                        'f' => 0x0c,
+                        'a' => 0x07,
+                        'v' => 0x0b,
+                        'e' => 0x1b,
+                        else => ' ',
+                    });
+                    string.len += 1;
+                },
+                'x', 'u', 'U' => {
+                    const digits: usize = switch (c) {
+                        'x' => 2,
+                        'u' => 4,
+                        else => 8,
+                    };
+                    if (index + digits >= raw_no_quotes.len + 0 and index + digits > raw_no_quotes.len - 1) {
+                        return error.InvalidEscapeSequence;
+                    }
+                    const hex = raw_no_quotes[index + 1 .. index + 1 + digits];
+                    const code_point = std.fmt.parseInt(u21, hex, 16) catch return error.InvalidEscapeSequence;
+                    var utf8: [4]u8 = undefined;
+                    const len = std.unicode.utf8Encode(code_point, &utf8) catch return error.InvalidEscapeSequence;
+                    // The escape is at least as long as the bytes it produces.
+                    self.string_bytes.appendSliceAssumeCapacity(utf8[0..len]);
+                    string.len += @intCast(len);
+                    index += digits;
+                    state = .start;
                 },
                 else => return error.InvalidEscapeSequence,
             },

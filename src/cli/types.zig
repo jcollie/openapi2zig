@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_names = @import("../generators/unified/model_names.zig");
 
 pub const ResourceWrapperMode = enum {
     none,
@@ -141,6 +142,23 @@ pub const CliArgs = struct {
     /// location, description and allowed values, for a program that has to
     /// know them at run time -- a command line built over the client, say.
     operation_info: bool = false,
+    /// How component schema names become Zig type names.
+    model_naming: model_names.Mode = .raw,
+    /// Emit a `Pager` and `...Pages` functions for operations marked `x-ms-pageable`.
+    pagination: bool = false,
+    /// Declare named string enums as Zig enums.
+    string_enums: bool = false,
+    /// Emit `ApiError` and `parseApiError` for the API's common error model.
+    typed_errors: bool = false,
+    /// Put the operations of each tag in their own file (`client/<tag>.zig`).
+    split_by_tag: bool = false,
+    /// Generate a complete SDK repository (sources plus build files, docs,
+    /// CI workflows and examples) instead of bare Zig sources.
+    sdk: bool = false,
+    /// Path to the SDK config file. Defaults to `<output>/openapi2zig.json`.
+    sdk_config_path: ?[]const u8 = null,
+    /// SDK package name, used when no config file exists yet.
+    sdk_name: ?[]const u8 = null,
 
     pub fn deinit(self: *CliArgs, allocator: std.mem.Allocator) void {
         if (self.owns_tags) allocator.free(self.tags);

@@ -1,7 +1,6 @@
 const std = @import("std");
 const UnifiedDocument = @import("../../../models/common/document.zig").UnifiedDocument;
 const Schema = @import("../../../models/common/document.zig").Schema;
-const ident = @import("../ident_utils.zig");
 const model_generator = @import("../model_generator.zig");
 const UnifiedModelGenerator = model_generator.UnifiedModelGenerator;
 const isExtensibleRequest = model_generator.isExtensibleRequest;
@@ -9,6 +8,8 @@ const isExtensibleRequest = model_generator.isExtensibleRequest;
 pub fn generateManualSchema(self: *UnifiedModelGenerator, name: []const u8, schema: Schema) !bool {
     _ = schema;
     if (std.mem.eql(u8, name, "CompoundFilter")) {
+        const schemas = self.source_schemas orelse return false;
+        if (!schemas.contains("ComparisonFilter")) return false;
         try self.buffer.appendSlice(self.allocator,
             \\pub const CompoundFilterItem = union(enum) {
             \\    comparison_filter: ComparisonFilter,
@@ -140,6 +141,8 @@ pub fn appendManualFieldType(self: *UnifiedModelGenerator, owner_name: []const u
         return true;
     }
     if (std.mem.eql(u8, owner_name, "FunctionTool") and std.mem.eql(u8, field_name, "parameters")) {
+        const schemas = self.source_schemas orelse return false;
+        if (!schemas.contains("FunctionParameters")) return false;
         try self.buffer.appendSlice(self.allocator, "?FunctionParameters");
         return true;
     }
@@ -148,6 +151,8 @@ pub fn appendManualFieldType(self: *UnifiedModelGenerator, owner_name: []const u
         std.mem.eql(u8, owner_name, "CreateThreadAndRunRequest")) and
         std.mem.eql(u8, field_name, "tool_choice"))
     {
+        const schemas = self.source_schemas orelse return false;
+        if (!schemas.contains("AssistantsApiToolChoiceOption")) return false;
         try self.buffer.appendSlice(self.allocator, "?AssistantsApiToolChoiceOption");
         return true;
     }

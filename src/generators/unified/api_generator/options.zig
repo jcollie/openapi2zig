@@ -20,8 +20,11 @@ pub fn appendFlatCallArguments(self: *UnifiedApiGenerator, operation: Operation)
         for (params) |param| {
             if (self.args.parameters_as_struct and param.location != .body) continue;
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendFlatParamIdentifier(name);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendFlatParamIdentifier(param.name);
+            }
         }
     }
     try self.buffer.appendSlice(self.allocator, ")");
@@ -138,7 +141,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
 
     var candidate: []const u8 = try self.optionsTypeBaseNameAlloc(operation, path);
     defer self.allocator.free(candidate);
-    while (self.topLevelNameConflicts(candidate, document)) {
+    while (try self.topLevelNameConflicts(candidate, document)) {
         const suffixed = try std.fmt.allocPrint(self.allocator, "{s}_", .{candidate});
         self.allocator.free(candidate);
         candidate = suffixed;
@@ -146,6 +149,7 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
     const key = try self.optionsTypeKeyAlloc(operation, method, path);
     defer self.allocator.free(key);
     if (self.options_type_names.fetchRemove(key)) |kv| {
+        _ = self.options_name_set.remove(kv.value);
         self.allocator.free(kv.key);
         self.allocator.free(kv.value);
     }
@@ -154,6 +158,8 @@ pub fn generateOptionsType(self: *UnifiedApiGenerator, operation: Operation, met
         errdefer self.allocator.free(key_copy_);
         const candidate_copy_ = try self.allocator.dupe(u8, candidate);
         errdefer self.allocator.free(candidate_copy_);
+        try self.options_name_set.put(candidate_copy_, {});
+        errdefer _ = self.options_name_set.remove(candidate_copy_);
         try self.options_type_names.put(key_copy_, candidate_copy_);
     }
 
@@ -290,8 +296,11 @@ pub fn appendFlatOperationParameters(self: *UnifiedApiGenerator, operation: Oper
         }
         for (params) |param| {
             try self.buffer.appendSlice(self.allocator, ", ");
-            const name: []const u8 = if (param.location == .body) "requestBody" else param.name;
-            try self.appendFlatParamIdentifier(name);
+            if (param.location == .body) {
+                try self.buffer.appendSlice(self.allocator, "requestBody");
+            } else {
+                try self.appendFlatParamIdentifier(param.name);
+            }
             try self.buffer.appendSlice(self.allocator, ": ");
             if ((param.location == .query or param.location == .header or param.location == .form) and !param.required) try self.buffer.appendSlice(self.allocator, "?");
             try self.appendParamBaseType(param);

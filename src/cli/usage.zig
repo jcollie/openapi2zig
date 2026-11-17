@@ -62,6 +62,17 @@ pub fn printUsage() void {
         \\   --doc-comments            Carry summaries and descriptions into doc comments
         \\   --operation-info          Declare operation_info, describing each operation's
         \\                            method, path and parameters for use at run time
+        \\   --string-enums            Declare named string enums as Zig enums. Values the spec does
+        \\                            not list parse as the _unknown member instead of failing.
+        \\   --split-by-tag            With --multiple-files, put the operations of each tag in
+        \\                            client/<tag>.zig; client.zig re-exports all of them.
+        \\   --typed-errors            Generate ApiError and parseApiError for the error model that
+        \\                            most error responses of the API use.
+        \\   --pagination              Generate a Pager and <operation>Pages functions for operations
+        \\                            marked x-ms-pageable, which follow the next page link.
+        \\   --model-naming <mode>     Name generated model types: raw (default, names as written
+        \\                            in the spec) or namespaced (shared prefix removed, PascalCase,
+        \\                            plus nested aliases such as security.Alert).
         \\
         \\ EXAMPLES:
         \\   openapi2zig generate -i ./openapi/petstore.json -o api.zig

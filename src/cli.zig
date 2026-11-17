@@ -1,6 +1,4 @@
 const std = @import("std");
-const version_info = @import("build_info");
-const ident = @import("generators/unified/ident_utils.zig");
 
 const usage = @import("cli/usage.zig");
 pub const printUsage = usage.printUsage;
@@ -29,6 +27,7 @@ pub const findReservedAlias = file_names_mod.findReservedAlias;
 pub const validateFileName = file_names_mod.validateFileName;
 pub const isAbsoluteImportPath = file_names_mod.isAbsoluteImportPath;
 pub const validateImportPath = file_names_mod.validateImportPath;
+pub const isValidSdkName = @import("cli/sdk.zig").isValidSdkName;
 
 const parse_mod = @import("cli/parse.zig");
 pub const parse = parse_mod.parse;

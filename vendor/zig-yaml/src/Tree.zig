@@ -40,12 +40,12 @@ pub fn extraData(tree: Tree, comptime T: type, index: Extra) struct { data: T, e
     const info = @typeInfo(T).@"struct";
     var i = @backingInt(index);
     var result: T = undefined;
-    inline for (info.field_names, info.field_types) |field_name, FieldType| {
-        @field(result, field_name) = switch (FieldType) {
+    inline for (info.field_names, info.field_types) |field_name, field_type| {
+        @field(result, field_name) = switch (field_type) {
             u32 => tree.extra[i],
             i32 => @bitCast(tree.extra[i]),
             Node.Index, Node.OptionalIndex, Token.Index => @fromBackingInt(@intCast(tree.extra[i])),
-            else => @compileError("bad field type: " ++ @typeName(FieldType)),
+            else => @compileError("bad field type: " ++ @typeName(field_type)),
         };
         i += 1;
     }

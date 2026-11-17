@@ -15,11 +15,10 @@ const Response = @import("../../models/common/document.zig").Response;
 const Operation = @import("../../models/common/document.zig").Operation;
 const PathItem = @import("../../models/common/document.zig").PathItem;
 const mime = @import("../../media_type.zig");
+const param_merge = @import("param_merge.zig");
 const SwaggerDocument = @import("../../models/v2.0/swagger.zig").SwaggerDocument;
 const Items2 = @import("../../models/v2.0/parameter.zig").Items;
 const Info2 = @import("../../models/v2.0/info.zig").Info;
-const Contact2 = @import("../../models/v2.0/info.zig").Contact;
-const License2 = @import("../../models/v2.0/info.zig").License;
 const ExternalDocs2 = @import("../../models/v2.0/externaldocs.zig").ExternalDocumentation;
 const Tag2 = @import("../../models/v2.0/tag.zig").Tag;
 const SecurityRequirement2 = @import("../../models/v2.0/security.zig").SecurityRequirement;
@@ -66,7 +65,7 @@ pub const SwaggerConverter = struct {
         const schemas = if (swagger.definitions) |definitions| try self.convertDefinitions(definitions) else null;
         const parameters = if (swagger.parameters) |params| try self.convertGlobalParameters(params) else null;
         const responses = if (swagger.responses) |resps| try self.convertGlobalResponses(resps) else null;
-        return UnifiedDocument{
+        var document = UnifiedDocument{
             .version = version,
             .info = info,
             .paths = paths,
@@ -78,6 +77,9 @@ pub const SwaggerConverter = struct {
             .parameters = parameters,
             .responses = responses,
         };
+        errdefer document.deinit(self.allocator);
+        try @import("../../models/common/streaming.zig").detectRequestStreaming(self.allocator, paths, schemas);
+        return document;
     }
 
     fn convertInfo(self: *SwaggerConverter, info: Info2) DocumentInfo {
@@ -232,7 +234,6 @@ pub const SwaggerConverter = struct {
             .enum_values = schema.enum_values,
             .default = schema.default,
             .example = schema.example,
-            .additional_properties = if (schema.additionalProperties != null) true else null,
         };
     }
 
@@ -259,13 +260,13 @@ pub const SwaggerConverter = struct {
     }
 
     fn convertPathItem(self: *SwaggerConverter, pathItem: PathItem2) !PathItem {
-        const get = if (pathItem.get) |op| try self.convertOperation(op) else null;
-        const put = if (pathItem.put) |op| try self.convertOperation(op) else null;
-        const post = if (pathItem.post) |op| try self.convertOperation(op) else null;
-        const delete = if (pathItem.delete) |op| try self.convertOperation(op) else null;
-        const options = if (pathItem.options) |op| try self.convertOperation(op) else null;
-        const head = if (pathItem.head) |op| try self.convertOperation(op) else null;
-        const patch = if (pathItem.patch) |op| try self.convertOperation(op) else null;
+        const get = try self.convertPathOperation(pathItem.get, pathItem.parameters);
+        const put = try self.convertPathOperation(pathItem.put, pathItem.parameters);
+        const post = try self.convertPathOperation(pathItem.post, pathItem.parameters);
+        const delete = try self.convertPathOperation(pathItem.delete, pathItem.parameters);
+        const options = try self.convertPathOperation(pathItem.options, pathItem.parameters);
+        const head = try self.convertPathOperation(pathItem.head, pathItem.parameters);
+        const patch = try self.convertPathOperation(pathItem.patch, pathItem.parameters);
         const parameters = if (pathItem.parameters) |params| try self.convertParameters(params, null) else null;
         return PathItem{
             .get = get,
@@ -277,6 +278,19 @@ pub const SwaggerConverter = struct {
             .patch = patch,
             .parameters = parameters,
         };
+    }
+
+    /// Converts an operation and merges the path item's parameters into it.
+    fn convertPathOperation(self: *SwaggerConverter, raw_operation: ?Operation2, path_parameters: anytype) !?Operation {
+        const raw = raw_operation orelse return null;
+        var operation = try self.convertOperation(raw);
+        if (path_parameters) |params| {
+            // Inherited body parameters follow the operation's `consumes`, then the document's.
+            const op_consumes: ?[]const []const u8 = if (raw.consumes) |c| c else self.spec_consumes;
+            const path_level = try self.convertParameters(params, op_consumes);
+            try param_merge.mergePathLevel(self.allocator, &operation, path_level);
+        }
+        return operation;
     }
 
     fn convertOperation(self: *SwaggerConverter, operation: Operation2) !Operation {

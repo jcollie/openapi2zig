@@ -15,15 +15,13 @@ const Response = @import("../../models/common/document.zig").Response;
 const Operation = @import("../../models/common/document.zig").Operation;
 const PathItem = @import("../../models/common/document.zig").PathItem;
 const mime = @import("../../media_type.zig");
+const param_merge = @import("param_merge.zig");
 const OpenApi31Document = @import("../../models/v3.1/openapi.zig").OpenApi31Document;
 const Info31 = @import("../../models/v3.1/info.zig").Info;
-const Contact31 = @import("../../models/v3.1/info.zig").Contact;
-const License31 = @import("../../models/v3.1/info.zig").License;
 const ExternalDocs31 = @import("../../models/v3.1/externaldocs.zig").ExternalDocumentation;
 const Tag31 = @import("../../models/v3.1/tag.zig").Tag;
 const Server31 = @import("../../models/v3.1/server.zig").Server;
 const SecurityRequirement31 = @import("../../models/v3.1/security.zig").SecurityRequirement;
-const SecuritySchemeOrReference31 = @import("../../models/v3.1/security.zig").SecuritySchemeOrReference;
 const UnifiedSecurityScheme = @import("../../models/common/document.zig").SecurityScheme;
 const Components31 = @import("../../models/v3.1/components.zig").Components;
 const SchemaOrReference31 = @import("../../models/v3.1/schema.zig").SchemaOrReference;
@@ -41,6 +39,14 @@ const Paths31 = @import("../../models/v3.1/paths.zig").Paths;
 pub const OpenApi31Converter = struct {
     allocator: std.mem.Allocator,
     source_schemas: ?*const std.StringHashMap(SchemaOrReference31) = null,
+    source_request_bodies: ?*const std.StringHashMap(RequestBodyOrReference31) = null,
+    /// Parameters declared under `components.parameters`, so that a parameter
+    /// given as a `$ref` resolves to the parameter it points at.
+    component_parameters: ?*const std.StringHashMap(ParameterOrReference31) = null,
+    /// Responses declared under `components.responses`, so that a response given
+    /// as a `$ref` keeps the schema it points at.
+    source_responses: ?*const std.StringHashMap(ResponseOrReference31) = null,
+    active_all_of_refs: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) OpenApi31Converter {
         return OpenApi31Converter{ .allocator = allocator };
@@ -49,6 +55,24 @@ pub const OpenApi31Converter = struct {
     pub fn convert(self: *OpenApi31Converter, openapi: OpenApi31Document) !UnifiedDocument {
         const version = openapi.openapi;
         const info = self.convertInfo(openapi.info);
+        if (openapi.components) |*components| {
+            if (components.schemas) |*schemas| self.source_schemas = schemas;
+            if (components.requestBodies) |*bodies| self.source_request_bodies = bodies;
+        }
+        defer self.source_schemas = null;
+        defer self.source_request_bodies = null;
+        if (openapi.components) |*components| {
+            if (components.parameters) |*component_parameters| self.component_parameters = component_parameters;
+        }
+        defer self.component_parameters = null;
+        if (openapi.components) |*components| {
+            if (components.responses) |*component_responses| self.source_responses = component_responses;
+        }
+        defer self.source_responses = null;
+        defer {
+            self.active_all_of_refs.deinit(self.allocator);
+            self.active_all_of_refs = .empty;
+        }
         const paths = if (openapi.paths) |p| try self.convertPaths(p) else std.StringHashMap(PathItem).init(self.allocator);
         const servers = if (openapi.servers) |servers_list| try self.convertServers(servers_list) else null;
         const security = if (openapi.security) |security_list| try self.convertSecurityRequirements(security_list) else null;
@@ -56,7 +80,7 @@ pub const OpenApi31Converter = struct {
         const externalDocs = if (openapi.externalDocs) |ext_docs| try self.convertExternalDocs(ext_docs) else null;
         const schemas = if (openapi.components) |components| try self.convertSchemas(components) else null;
         const security_schemes = if (openapi.components) |components| try self.convertSecuritySchemes(components) else null;
-        return UnifiedDocument{
+        var document = UnifiedDocument{
             .version = version,
             .info = info,
             .paths = paths,
@@ -69,6 +93,9 @@ pub const OpenApi31Converter = struct {
             .parameters = null,
             .responses = null,
         };
+        errdefer document.deinit(self.allocator);
+        try @import("../../models/common/streaming.zig").detectRequestStreaming(self.allocator, paths, schemas);
+        return document;
     }
 
     fn convertSecuritySchemes(self: *OpenApi31Converter, components: Components31) std.mem.Allocator.Error!?*std.StringHashMap(UnifiedSecurityScheme) {
@@ -195,10 +222,6 @@ pub const OpenApi31Converter = struct {
     fn convertSchemas(self: *OpenApi31Converter, components: Components31) !std.StringHashMap(Schema) {
         var schemas = std.StringHashMap(Schema).init(self.allocator);
         if (components.schemas) |schemas_map| {
-            const previous_source_schemas = self.source_schemas;
-            self.source_schemas = &schemas_map;
-            defer self.source_schemas = previous_source_schemas;
-
             var schema_iterator = schemas_map.iterator();
             while (schema_iterator.next()) |entry| {
                 const key = try self.allocator.dupe(u8, entry.key_ptr.*);
@@ -229,9 +252,20 @@ pub const OpenApi31Converter = struct {
     }
 
     fn convertResolvedSchemaReference(self: *OpenApi31Converter, ref: []const u8) anyerror!?Schema {
+        const prefix = "#/components/schemas/";
+        if (!std.mem.startsWith(u8, ref, prefix)) return null;
+        const name = ref[prefix.len..];
+        for (self.active_all_of_refs.items) |active| {
+            if (std.mem.eql(u8, active, name)) return null;
+        }
         const source_schemas = self.source_schemas orelse return null;
-        const schema_or_ref = source_schemas.get(refName(ref)) orelse return null;
-        return try self.convertSchemaOrReference(schema_or_ref);
+        const schema_or_ref = source_schemas.get(name) orelse return null;
+        try self.active_all_of_refs.append(self.allocator, name);
+        defer _ = self.active_all_of_refs.pop();
+        return switch (schema_or_ref) {
+            .reference => |alias| try self.convertResolvedSchemaReference(alias.ref),
+            .schema => |schema| try self.convertSchema(schema.*),
+        };
     }
 
     fn mergeRequired(self: *OpenApi31Converter, required_list: *std.ArrayList([]const u8), required: ?[][]const u8) !void {
@@ -296,6 +330,7 @@ pub const OpenApi31Converter = struct {
             .discriminator_property = discriminator_property,
             .one_of = one_of,
             .any_of = any_of,
+            .additional_properties = schema.additional_properties,
             .nullable = schema.nullable,
         };
     }
@@ -361,6 +396,12 @@ pub const OpenApi31Converter = struct {
 
         var merged_properties = std.StringHashMap(Schema).init(self.allocator);
         var required_list = std.ArrayList([]const u8).empty;
+        var boolean_type = if (schema.type) |kind| std.mem.eql(u8, kind, "boolean") else false;
+        var enum_values = schema.enum_values;
+        var additional_properties: ?bool = if (schema.additionalProperties) |ap| switch (ap) {
+            .boolean => |allow| allow,
+            .schema_or_reference => null,
+        } else null;
 
         if (schema.allOf) |all_of| {
             for (all_of) |item| {
@@ -370,6 +411,19 @@ pub const OpenApi31Converter = struct {
                 };
                 try self.mergeProperties(&merged_properties, converted);
                 try self.mergeRequired(&required_list, converted.required);
+                if (converted.type == .boolean) boolean_type = true;
+                // Preserve an enum that rules true out when flattening a
+                // boolean allOf. This is not a general satisfiability solver.
+                if (converted.enum_values) |values| {
+                    var permits_true = false;
+                    for (values) |value| {
+                        if (value == .bool and value.bool) permits_true = true;
+                    }
+                    if (!permits_true or enum_values == null) enum_values = values;
+                }
+                if (converted.additional_properties) |allow| {
+                    if (additional_properties != false) additional_properties = allow;
+                }
                 converted.deinit(self.allocator);
             }
         }
@@ -399,15 +453,16 @@ pub const OpenApi31Converter = struct {
         }
 
         return Schema{
-            .type = .object,
+            .type = if (boolean_type and !has_properties) .boolean else .object,
             .ref = null,
             .title = schema.title,
             .description = schema.description,
             .format = schema.format,
             .required = required,
             .properties = if (has_properties) merged_properties else null,
+            .additional_properties = additional_properties,
             .items = null,
-            .enum_values = schema.enum_values,
+            .enum_values = enum_values,
             .enum_id = schema.spec_enum_id,
             .default = schema.default,
             .example = schema.example,
@@ -444,52 +499,11 @@ pub const OpenApi31Converter = struct {
         return refs;
     }
 
-    fn convertUnionSchema(self: *OpenApi31Converter, schema: Schema31) anyerror!Schema {
-        const discriminator = schema.discriminator;
-
-        if (schema.oneOf) |one_of| {
-            const variants = try self.convertUnionVariants(one_of);
-            if (discriminator) |disc| {
-                if (try self.convertUnionRefs(one_of)) |refs| {
-                    return Schema{
-                        .type = .object,
-                        .one_of_refs = refs,
-                        .discriminator_property = try self.allocator.dupe(u8, disc.propertyName),
-                        .one_of = variants,
-                    };
-                }
-            }
-            return Schema{ .type = .object, .one_of = variants };
-        }
-
-        if (schema.anyOf) |any_of| {
-            const variants = try self.convertUnionVariants(any_of);
-            if (discriminator) |disc| {
-                if (try self.convertUnionRefs(any_of)) |refs| {
-                    return Schema{
-                        .type = .object,
-                        .any_of_refs = refs,
-                        .discriminator_property = try self.allocator.dupe(u8, disc.propertyName),
-                        .any_of = variants,
-                    };
-                }
-            }
-            return Schema{ .type = .object, .any_of = variants };
-        }
-
-        return Schema{
-            .type = .object,
-            .description = "OpenAPI oneOf with discriminator could not be generated safely; generator currently uses std.json.Value.",
-        };
-    }
-
     fn convertSchema(self: *OpenApi31Converter, schema: Schema31) anyerror!Schema {
         if (schema.allOf != null) {
-            return try self.convertAllOfSchema(schema);
-        }
-
-        if ((schema.oneOf != null or schema.anyOf != null) and schema.properties == null) {
-            return try self.convertUnionSchema(schema);
+            var converted = try self.convertAllOfSchema(schema);
+            try self.attachComposition(&converted, schema);
+            return converted;
         }
 
         // Handle type_array (e.g. ["string", "null"]) by using the first non-null type
@@ -542,11 +556,11 @@ pub const OpenApi31Converter = struct {
         } else null;
         const additional_properties: ?bool = if (schema.additionalProperties) |ap| switch (ap) {
             .boolean => |b| b,
-            .schema_or_reference => true,
+            .schema_or_reference => null,
         } else null;
 
-        return Schema{
-            .type = schema_type,
+        var converted = Schema{
+            .type = schema_type orelse (if (schema.oneOf != null or schema.anyOf != null) SchemaType.object else null),
             .ref = null,
             .title = title,
             .description = description,
@@ -561,6 +575,20 @@ pub const OpenApi31Converter = struct {
             .additional_properties = additional_properties,
             .nullable = nullable,
         };
+        try self.attachComposition(&converted, schema);
+        return converted;
+    }
+
+    // JSON Schema composition applies alongside properties, not instead of
+    // them. Retain both union keywords even when both occur on one schema.
+    fn attachComposition(self: *OpenApi31Converter, converted: *Schema, schema: Schema31) !void {
+        if (schema.oneOf) |variants| converted.one_of = try self.convertUnionVariants(variants);
+        if (schema.anyOf) |variants| converted.any_of = try self.convertUnionVariants(variants);
+        if (schema.discriminator) |disc| {
+            converted.discriminator_property = try self.allocator.dupe(u8, disc.propertyName);
+            if (schema.oneOf) |variants| converted.one_of_refs = try self.convertUnionRefs(variants);
+            if (schema.anyOf) |variants| converted.any_of_refs = try self.convertUnionRefs(variants);
+        }
     }
 
     fn convertSchemaType(self: *OpenApi31Converter, type_str: []const u8) SchemaType {
@@ -587,13 +615,13 @@ pub const OpenApi31Converter = struct {
     }
 
     fn convertPathItem(self: *OpenApi31Converter, pathItem: PathItem31) !PathItem {
-        const get = if (pathItem.get) |op| try self.convertOperation(op) else null;
-        const put = if (pathItem.put) |op| try self.convertOperation(op) else null;
-        const post = if (pathItem.post) |op| try self.convertOperation(op) else null;
-        const delete = if (pathItem.delete) |op| try self.convertOperation(op) else null;
-        const options = if (pathItem.options) |op| try self.convertOperation(op) else null;
-        const head = if (pathItem.head) |op| try self.convertOperation(op) else null;
-        const patch = if (pathItem.patch) |op| try self.convertOperation(op) else null;
+        const get = try self.convertPathOperation(pathItem.get, pathItem.parameters);
+        const put = try self.convertPathOperation(pathItem.put, pathItem.parameters);
+        const post = try self.convertPathOperation(pathItem.post, pathItem.parameters);
+        const delete = try self.convertPathOperation(pathItem.delete, pathItem.parameters);
+        const options = try self.convertPathOperation(pathItem.options, pathItem.parameters);
+        const head = try self.convertPathOperation(pathItem.head, pathItem.parameters);
+        const patch = try self.convertPathOperation(pathItem.patch, pathItem.parameters);
         const parameters = if (pathItem.parameters) |params| try self.convertParameters(params) else null;
         return PathItem{
             .get = get,
@@ -605,6 +633,17 @@ pub const OpenApi31Converter = struct {
             .patch = patch,
             .parameters = parameters,
         };
+    }
+
+    /// Converts an operation and merges the path item's parameters into it.
+    fn convertPathOperation(self: *OpenApi31Converter, raw_operation: ?Operation31, path_parameters: anytype) !?Operation {
+        const raw = raw_operation orelse return null;
+        var operation = try self.convertOperation(raw);
+        if (path_parameters) |params| {
+            const path_level = try self.convertParameters(params);
+            try param_merge.mergePathLevel(self.allocator, &operation, path_level);
+        }
+        return operation;
     }
 
     fn convertOperation(self: *OpenApi31Converter, operation: Operation31) !Operation {
@@ -669,11 +708,25 @@ pub const OpenApi31Converter = struct {
     fn convertRequestBodyOrReference(self: *OpenApi31Converter, requestBodyOrRef: *const RequestBodyOrReference31) !Parameter {
         switch (requestBodyOrRef.*) {
             .reference => |ref| {
-                return Parameter{
-                    .name = ref.ref,
-                    .location = .body,
-                    .required = false,
-                };
+                // Follow component aliases iteratively; a local visited set
+                // handles cycles without restricting valid alias-chain depth.
+                var visited = std.StringHashMap(void).init(self.allocator);
+                defer visited.deinit();
+                var current = ref.ref;
+                while (std.mem.startsWith(u8, current, "#/components/requestBodies/")) {
+                    if ((try visited.getOrPut(current)).found_existing) break;
+                    const bodies = self.source_request_bodies orelse break;
+                    const target = bodies.get(current["#/components/requestBodies/".len..]) orelse break;
+                    switch (target) {
+                        .reference => |alias| current = alias.ref,
+                        .request_body => |*body| {
+                            var parameter = try self.convertRequestBody(body);
+                            parameter.name = ref.ref;
+                            return parameter;
+                        },
+                    }
+                }
+                return Parameter{ .name = ref.ref, .location = .body, .required = false };
             },
             .request_body => |*body| {
                 return self.convertRequestBody(body);
@@ -716,9 +769,30 @@ pub const OpenApi31Converter = struct {
         return converted_params;
     }
 
+    /// Look up a `#/components/parameters/<name>` reference, following alias
+    /// chains. The hop limit bounds cyclic definitions.
+    fn resolveComponentParameter(self: *OpenApi31Converter, ref: []const u8) ?Parameter31 {
+        const prefix = "#/components/parameters/";
+        const max_hops = 32;
+        const parameters = self.component_parameters orelse return null;
+
+        var current = ref;
+        var hops: usize = 0;
+        while (hops < max_hops) : (hops += 1) {
+            if (!std.mem.startsWith(u8, current, prefix)) return null;
+            const entry = parameters.get(current[prefix.len..]) orelse return null;
+            switch (entry) {
+                .parameter => |param| return param,
+                .reference => |next| current = next.ref,
+            }
+        }
+        return null;
+    }
+
     fn convertParameterOrReference(self: *OpenApi31Converter, paramOrRef: *const ParameterOrReference31) !Parameter {
         switch (paramOrRef.*) {
             .reference => |ref| {
+                if (self.resolveComponentParameter(ref.ref)) |resolved| return self.convertParameter(resolved);
                 return Parameter{
                     .name = ref.ref,
                     .location = .query,
@@ -760,12 +834,36 @@ pub const OpenApi31Converter = struct {
     fn convertResponseOrReference(self: *OpenApi31Converter, respOrRef: ResponseOrReference31) !Response {
         switch (respOrRef) {
             .reference => |ref| {
+                if (self.resolveComponentResponse(ref.ref)) |resolved| {
+                    return self.convertResponse(resolved);
+                }
                 return Response{ .description = ref.ref };
             },
             .response => |resp| {
                 return self.convertResponse(resp);
             },
         }
+    }
+
+    /// Look up a `#/components/responses/<name>` reference. A component entry
+    /// may itself be a Reference Object, so alias chains are followed; the hop
+    /// limit bounds cyclic definitions.
+    fn resolveComponentResponse(self: *OpenApi31Converter, ref: []const u8) ?Response31 {
+        const prefix = "#/components/responses/";
+        const max_hops = 32;
+        const responses = self.source_responses orelse return null;
+
+        var current = ref;
+        var hops: usize = 0;
+        while (hops < max_hops) : (hops += 1) {
+            if (!std.mem.startsWith(u8, current, prefix)) return null;
+            const entry = responses.get(current[prefix.len..]) orelse return null;
+            switch (entry) {
+                .response => |response| return response,
+                .reference => |next| current = next.ref,
+            }
+        }
+        return null;
     }
 
     fn convertResponse(self: *OpenApi31Converter, response: Response31) !Response {

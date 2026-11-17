@@ -2,6 +2,8 @@ const std = @import("std");
 const types = @import("types.zig");
 const usage = @import("usage.zig");
 const fnames = @import("file_names.zig");
+const sdk_helpers = @import("sdk.zig");
+const model_names = @import("../generators/unified/model_names.zig");
 const ResourceWrapperMode = types.ResourceWrapperMode;
 const MultipleClientsMode = types.MultipleClientsMode;
 const OperationNameMode = types.OperationNameMode;
@@ -43,7 +45,12 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
         }
     }
 
-    const min_args: usize = if (has_runtime_only) 3 else 4;
+    var has_sdk = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--sdk")) has_sdk = true;
+    }
+
+    const min_args: usize = if (has_runtime_only or has_sdk) 3 else 4;
     if (args.len < min_args or (args.len >= 1 and !std.mem.eql(u8, args[1], "generate"))) {
         printUsage();
         return .{
@@ -78,6 +85,14 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
     var name_overrides: []const OperationNameOverride = &.{};
     var name_overrides_owned = false;
     var generate_enums = false;
+    var model_naming: model_names.Mode = .raw;
+    var pagination = false;
+    var typed_errors = false;
+    var split_by_tag = false;
+    var string_enums = false;
+    var sdk = false;
+    var sdk_config_path: ?[]const u8 = null;
+    var sdk_name: ?[]const u8 = null;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -277,10 +292,100 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             };
         } else if (std.mem.eql(u8, arg, "--enums")) {
             generate_enums = true;
+        } else if (std.mem.eql(u8, arg, "--pagination")) {
+            pagination = true;
+        } else if (std.mem.eql(u8, arg, "--string-enums")) {
+            string_enums = true;
+        } else if (std.mem.eql(u8, arg, "--split-by-tag")) {
+            split_by_tag = true;
+        } else if (std.mem.eql(u8, arg, "--typed-errors")) {
+            typed_errors = true;
+        } else if (std.mem.eql(u8, arg, "--model-naming")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--model-naming value required\n", .{});
+                return error.InvalidArguments;
+            }
+            model_naming = model_names.Mode.fromString(args[i]) orelse {
+                printUsage();
+                printError("invalid --model-naming '{s}', expected raw or namespaced\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--sdk")) {
+            sdk = true;
+        } else if (std.mem.eql(u8, arg, "--sdk-config")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--sdk-config value required\n", .{});
+                return error.InvalidArguments;
+            }
+            if (std.mem.startsWith(u8, args[i], "-")) {
+                printUsage();
+                printError("--sdk-config value must not start with '-'\n", .{});
+                return error.InvalidArguments;
+            }
+            sdk_config_path = args[i];
+        } else if (std.mem.eql(u8, arg, "--sdk-name")) {
+            i += 1;
+            if (i >= args.len) {
+                printUsage();
+                printError("--sdk-name value required\n", .{});
+                return error.InvalidArguments;
+            }
+            sdk_name = args[i];
         }
     }
 
-    if (input_path == null and !runtime_only) {
+    if (!sdk and (sdk_config_path != null or sdk_name != null)) {
+        printUsage();
+        printError("--sdk-config and --sdk-name require --sdk\n", .{});
+        return error.InvalidArguments;
+    }
+
+    if (sdk) {
+        if (runtime_only or models_only or runtime_module != null or file_names.any()) {
+            printUsage();
+            printError("--sdk cannot be combined with --runtime-only, --models-only, --runtime-module or --file-name\n", .{});
+            return error.InvalidArguments;
+        }
+        if (multiple_clients != null) {
+            printUsage();
+            printError("--multiple-clients is not available with --sdk\n", .{});
+            return error.InvalidArguments;
+        }
+        if (resource_wrappers_explicit or tags_list.items.len > 0) {
+            // These come from the "generator" section of openapi2zig.json, so a
+            // command line value would be silently replaced.
+            printUsage();
+            printError("--sdk takes --resource-wrappers and --tag from openapi2zig.json (generator section)\n", .{});
+            return error.InvalidArguments;
+        }
+        if (sdk_name) |name| {
+            if (!sdk_helpers.isValidSdkName(name)) {
+                printUsage();
+                printError("invalid --sdk-name '{s}', expected a lowercase Zig identifier\n", .{name});
+                return error.InvalidArguments;
+            }
+        }
+        multiple_files = true;
+    }
+
+    if (split_by_tag) {
+        if (!multiple_files) {
+            printUsage();
+            printError("--split-by-tag requires --multiple-files\n", .{});
+            return error.InvalidArguments;
+        }
+        if (multiple_clients != null or models_only or runtime_module != null or file_names.any()) {
+            printUsage();
+            printError("--split-by-tag cannot be combined with --multiple-clients, --models-only, --runtime-module or --file-name\n", .{});
+            return error.InvalidArguments;
+        }
+    }
+
+    if (input_path == null and !runtime_only and !sdk) {
         printUsage();
         printError("OpenAPI spec path or URL required\n", .{});
         return error.InvalidArguments;
@@ -508,6 +613,14 @@ pub fn parse(allocator: std.mem.Allocator, args: []const [:0]const u8) !ParsedAr
             .generate_enums = generate_enums,
             .doc_comments = doc_comments,
             .operation_info = operation_info,
+            .model_naming = model_naming,
+            .pagination = pagination,
+            .typed_errors = typed_errors,
+            .split_by_tag = split_by_tag,
+            .string_enums = string_enums,
+            .sdk = sdk,
+            .sdk_config_path = sdk_config_path,
+            .sdk_name = sdk_name,
         },
     };
 }

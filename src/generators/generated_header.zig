@@ -69,3 +69,10 @@ pub fn hasChanged(existing_content: []const u8, new_code: []const u8) bool {
     const new_checksum = computeChecksum(new_code);
     return existing_checksum != new_checksum;
 }
+
+/// The current UTC year, used for copyright lines in scaffolded files.
+pub fn currentYear(io: std.Io) u16 {
+    const now = std.Io.Clock.real.now(io);
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @as(u64, @intCast(now.toSeconds())) };
+    return epoch_seconds.getEpochDay().calculateYearDay().year;
+}

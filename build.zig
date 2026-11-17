@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_root_module,
     });
     exe.root_module.addImport("openapi2zig", openapi2zig_mod);
+    b.addNamedLazyPath("openapi2zig-cli", exe.getEmittedBin());
     b.installArtifact(exe);
 
     // Static library for linking
@@ -56,7 +57,8 @@ pub fn build(b: *std.Build) void {
     const supported_targets = [_][]const u8{
         "x86_64-linux",
         "aarch64-linux",
-        "x86_64-windows",
+        "x86_64-windows-gnu",
+        "aarch64-windows-gnu",
         "x86_64-macos",
         "aarch64-macos",
     };
@@ -105,10 +107,10 @@ pub fn build(b: *std.Build) void {
         build_all_step.dependOn(&install_cross_exe.step);
     }
 
-    addInstallStep(b, target, build_info, yaml_dep, "install-release", "Build ReleaseSmall and install to $HOME/.local/bin", .ReleaseSmall);
-    addInstallStep(b, target, build_info, yaml_dep, "install-release-safe", "Build ReleaseSafe and install to $HOME/.local/bin", .ReleaseSafe);
-    addInstallStep(b, target, build_info, yaml_dep, "install-release-fast", "Build ReleaseFast and install to $HOME/.local/bin", .ReleaseFast);
-    addInstallStep(b, target, build_info, yaml_dep, "install-debug", "Build Debug and install to $HOME/.local/bin", .Debug);
+    addInstallStep(b, target, build_info, "install-release", "Build ReleaseSmall and install to $HOME/.local/bin", .small);
+    addInstallStep(b, target, build_info, "install-release-safe", "Build ReleaseSafe and install to $HOME/.local/bin", .safe);
+    addInstallStep(b, target, build_info, "install-release-fast", "Build ReleaseFast and install to $HOME/.local/bin", .fast);
+    addInstallStep(b, target, build_info, "install-debug", "Build Debug and install to $HOME/.local/bin", .debug);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -324,7 +326,7 @@ pub fn build(b: *std.Build) void {
         "http://localhost:1234",
     });
     const run_generate_lmstudio_json_step = b.step("run-generate-lmstudio", "Run the app with generate command for LM Studio OpenAPI JSON");
-    run_generate_lmstudio_json_step.dependOn(&run_generate_v3_yaml_cmd.step);
+    run_generate_lmstudio_json_step.dependOn(&run_generate_lmstudio_json_cmd.step);
 
     const run_generate_lmstudio_multi_cmd = b.addRunArtifact(exe);
     run_generate_lmstudio_multi_cmd.addArgs(&.{
@@ -358,7 +360,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_generate_anthropic_json_step = b.step("run-generate-anthropic", "Run the app with generate command for Anthropic OpenAPI JSON");
-    run_generate_anthropic_json_step.dependOn(&run_generate_lmstudio_json_cmd.step);
+    run_generate_anthropic_json_step.dependOn(&run_generate_anthropic_json_cmd.step);
 
     const run_generate_openai_json_cmd = b.addRunArtifact(exe);
     run_generate_openai_json_cmd.addArgs(&.{
@@ -470,6 +472,147 @@ pub fn build(b: *std.Build) void {
     const run_generated_tests = b.addRunArtifact(generated_tests);
     test_step.dependOn(&run_generated_tests.step);
 
+    // Exercise both flat arguments and optional-parameter structs over HTTP.
+    for ([_]bool{ false, true }) |options_mode| {
+        const provider_fixture = b.addRunArtifact(exe);
+        provider_fixture.addArg("generate");
+        if (options_mode) provider_fixture.addArg("--parameters-as-struct");
+        provider_fixture.addArg("-i");
+        provider_fixture.addFileArg(b.path("openapi/v3.1/regression-provider-schemas.json"));
+        provider_fixture.addArg("-o");
+        const provider_models = provider_fixture.addOutputFileArg(if (options_mode) "provider_options.zig" else "provider_models.zig");
+        const provider_tests_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_provider_schema_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        provider_tests_module.addImport("provider_fixture", b.createModule(.{
+            .root_source_file = provider_models,
+            .target = target,
+            .optimize = optimize,
+        }));
+        const provider_tests = b.addTest(.{ .root_module = provider_tests_module });
+        test_step.dependOn(&b.addRunArtifact(provider_tests).step);
+    }
+
+    const composition_fixture = b.addRunArtifact(exe);
+    composition_fixture.addArgs(&.{ "generate", "-i" });
+    composition_fixture.addFileArg(b.path("openapi/v3.1/regression-streaming-composition.json"));
+    composition_fixture.addArg("-o");
+    const composition_source = composition_fixture.addOutputFileArg("compositions.zig");
+    const composition_module = b.createModule(.{
+        .root_source_file = b.path("src/tests/compile_streaming_composition_fixture.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    composition_module.addImport("composition_fixture", b.createModule(.{
+        .root_source_file = composition_source,
+        .target = target,
+        .optimize = optimize,
+    }));
+    const composition_tests = b.addTest(.{ .root_module = composition_module });
+    const composition_test_step = b.step("test-streaming-composition", "Compile and round-trip generated mixed composition models");
+    composition_test_step.dependOn(&b.addRunArtifact(composition_tests).step);
+    test_step.dependOn(composition_test_step);
+
+    const collision_test_step = b.step("test-parameter-collisions", "Compile and exercise collision-safe parameters over loopback HTTP");
+    test_step.dependOn(collision_test_step);
+    for ([_]bool{ false, true }) |options_mode| {
+        for ([_]?[]const u8{ null, "PerTag", "PerEndpoint" }) |clients_mode| {
+            const collision_fixture = b.addRunArtifact(exe);
+            collision_fixture.addArg("generate");
+            if (options_mode) collision_fixture.addArg("--parameters-as-struct");
+            if (clients_mode) |mode| {
+                collision_fixture.addArgs(&.{ "--resource-wrappers", "none", "--multiple-clients", mode });
+            } else {
+                collision_fixture.addArgs(&.{ "--resource-wrappers", "paths" });
+            }
+            collision_fixture.addArg("-i");
+            collision_fixture.addFileArg(b.path("openapi/v3.1/regression-parameter-collisions.json"));
+            collision_fixture.addArg("-o");
+            const collision_source = collision_fixture.addOutputFileArg("collisions.zig");
+            const collision_module = b.createModule(.{
+                .root_source_file = b.path("src/tests/compile_parameter_collision_fixture.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            collision_module.addImport("collision_fixture", b.createModule(.{
+                .root_source_file = collision_source,
+                .target = target,
+                .optimize = optimize,
+            }));
+            const collision_tests = b.addTest(.{ .root_module = collision_module });
+            collision_test_step.dependOn(&b.addRunArtifact(collision_tests).step);
+        }
+    }
+
+    // OData-derived descriptions (Microsoft Graph and friends) use shapes the
+    // petstore samples never do: path-level parameters, response references,
+    // wildcard status codes, dotted names and OData path segments. Generate
+    // from a reduction of them in every client style and compile the result.
+    const odata_test_step = b.step("test-odata-shapes", "Compile code generated from an OData-shaped description");
+    test_step.dependOn(odata_test_step);
+    const odata_variants = [_][]const []const u8{
+        &.{ "--resource-wrappers", "none" },
+        &.{ "--resource-wrappers", "paths" },
+        &.{ "--resource-wrappers", "tags" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerTag" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerEndpoint" },
+        &.{ "--resource-wrappers", "paths", "--parameters-as-struct" },
+        &.{ "--resource-wrappers", "paths", "--model-naming", "namespaced", "--string-enums" },
+        &.{ "--resource-wrappers", "paths", "--pagination", "--typed-errors" },
+        &.{ "--resource-wrappers", "none", "--pagination", "--typed-errors", "--model-naming", "namespaced", "--parameters-as-struct" },
+        &.{ "--resource-wrappers", "none", "--multiple-clients", "PerTag", "--model-naming", "namespaced", "--parameters-as-struct" },
+    };
+    for (odata_variants) |variant| {
+        const odata_fixture = b.addRunArtifact(exe);
+        odata_fixture.addArg("generate");
+        odata_fixture.addArgs(variant);
+        odata_fixture.addArg("-i");
+        odata_fixture.addFileArg(b.path("openapi/v3.0/regression-odata-shapes.json"));
+        odata_fixture.addArg("-o");
+        const odata_source = odata_fixture.addOutputFileArg("odata.zig");
+        const odata_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_odata_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        odata_module.addImport("odata_fixture", b.createModule(.{
+            .root_source_file = odata_source,
+            .target = target,
+            .optimize = optimize,
+        }));
+        const odata_tests = b.addTest(.{ .root_module = odata_module });
+        odata_test_step.dependOn(&b.addRunArtifact(odata_tests).step);
+    }
+
+    // The same description with the operations split into one file per tag.
+    const odata_split_variants = [_][]const []const u8{
+        &.{ "--resource-wrappers", "none", "--parameters-as-struct", "--model-naming", "namespaced", "--pagination", "--typed-errors", "--string-enums" },
+        &.{ "--resource-wrappers", "paths" },
+    };
+    for (odata_split_variants) |variant| {
+        const split_fixture = b.addRunArtifact(exe);
+        split_fixture.addArgs(&.{ "generate", "--multiple-files", "--split-by-tag" });
+        split_fixture.addArgs(variant);
+        split_fixture.addArg("-i");
+        split_fixture.addFileArg(b.path("openapi/v3.0/regression-odata-shapes.json"));
+        split_fixture.addArg("-o");
+        const split_dir = split_fixture.addOutputDirectoryArg("odata_split");
+        const split_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/compile_odata_fixture.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        split_module.addImport("odata_fixture", b.createModule(.{
+            .root_source_file = split_dir.path(b, "client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }));
+        const split_tests = b.addTest(.{ .root_module = split_module });
+        odata_test_step.dependOn(&b.addRunArtifact(split_tests).step);
+    }
+
     const multi_generated_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("generated/compile_multi_generated.zig"),
@@ -485,6 +628,22 @@ pub fn build(b: *std.Build) void {
     const test_package_step = b.step("test-package", "Build downstream package consumer example");
     test_package_step.dependOn(&test_package_cmd.step);
     test_step.dependOn(&test_package_cmd.step);
+
+    // Generate a complete SDK repository from the petstore spec, then build it
+    // the way a consumer would: unit tests, every operation, and the examples.
+    const sdk_fixture_dir = ".zig-cache/sdk-fixture";
+    const sdk_generate = b.addRunArtifact(exe);
+    sdk_generate.addArgs(&.{ "generate", "--sdk", "--sdk-name", "petstore", "--force", "-i", "openapi/v3.0/petstore.json", "-o", sdk_fixture_dir });
+    var sdk_previous: *std.Build.Step = &sdk_generate.step;
+    for ([_][]const u8{ "test", "check", "examples" }) |sdk_step_name| {
+        const sdk_build = b.addSystemCommand(&.{ b.graph.zig_exe, "build", sdk_step_name });
+        sdk_build.setCwd(b.path(sdk_fixture_dir));
+        sdk_build.step.dependOn(sdk_previous);
+        sdk_previous = &sdk_build.step;
+    }
+    const test_sdk_step = b.step("test-sdk", "Generate a petstore SDK repository and build it");
+    test_sdk_step.dependOn(sdk_previous);
+    test_step.dependOn(sdk_previous);
 
     const test_artifact = b.addInstallArtifact(
         exe_unit_tests,
@@ -592,11 +751,14 @@ fn addInstallStep(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     build_info: *std.Build.Step.Options,
-    yaml_dep: *std.Build.Dependency,
     step_name: []const u8,
     description: []const u8,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
 ) void {
+    const yaml_dep = b.dependency("yaml", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const exe = addOpenApi2ZigExecutable(b, "openapi2zig", target, optimize, build_info, yaml_dep);
     const install_step = b.step(step_name, description);
     const install = b.addRunArtifact(addHostTool(b, "install_release", "tools/install_release.zig"));
@@ -612,7 +774,7 @@ fn addOpenApi2ZigExecutable(
     b: *std.Build,
     name: []const u8,
     target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
+    optimize: std.lang.Optimize,
     build_info: *std.Build.Step.Options,
     yaml_dep: *std.Build.Dependency,
 ) *std.Build.Step.Compile {
